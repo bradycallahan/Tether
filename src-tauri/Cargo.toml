@@ -1,0 +1,36 @@
+[package]
+name = "tether"
+version = "0.1.0"
+edition = "2021"
+description = "Tether — an open-source terminal for SSH and serial consoles"
+license = "MIT"
+
+[lib]
+name = "tether_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+tokio = { version = "1", features = ["full"] }
+russh = { version = "0.64", features = ["des"] }
+serialport = "4"
+portable-pty = "0.9"
+bytes = "1"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+anyhow = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = "0.4"
+base64 = "0.22"
+strip-ansi-escapes = "0.2"
+dirs = "6"
+parking_lot = "0.12"
+log = "0.4"
