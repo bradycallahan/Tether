@@ -154,6 +154,25 @@ node scripts/bump-version.mjs 0.2.0
 
 Then move the "Unreleased" changelog entries under the new version, commit, tag `v0.2.0` and push the tag. GitHub Actions builds Windows, macOS and Linux installers and attaches them to a draft release; the owner reviews and publishes it. Don't push tags unless asked.
 
+## Handing work back to the owner
+
+The owner pushes to GitHub himself. At the end of every task that changes files, finish your summary with a short **"Push this update"** section containing the exact commands to run, tailored to what you did. Don't make him work them out.
+
+- Always give the commands as a copy-pasteable block, run from the repo root:
+  ```sh
+  git add -A
+  git commit -m "<a real message describing this change>"
+  git push
+  ```
+  Write the commit message for him — specific, imperative, under ~70 characters (e.g. "Add expect/send login scripts with prompt timeouts").
+- If you already committed (because he asked you to), say so and give only `git push`.
+- If the change is ready to ship as a release, say so and add the release steps from "Releasing" with the next version number filled in (a feature bumps the minor, a fix bumps the patch), and remind him to move the changelog entries and publish the draft release afterwards.
+- If the change is not ready to ship, say what's left so he knows not to tag yet.
+- If something needs doing on GitHub itself (a secret, a setting, a failed Actions run to check), spell out where to click.
+- Mention anything he should test by hand before pushing — especially things you couldn't test yourself (Windows, macOS, real serial hardware, real network gear).
+
+Don't run `git push` or create tags yourself unless he explicitly asks.
+
 ## Legal
 
 Tether is a clean-room implementation. Don't decompile, disassemble or copy anything from SecureCRT or other proprietary software. Public documentation, file formats the user owns (like their exported session files), and ordinary observation of behavior are fine. Don't use VanDyke's trademarks in the UI beyond describing the importer.
