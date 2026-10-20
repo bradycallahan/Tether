@@ -42,34 +42,59 @@ Further guidance:
 
 ```
 src/                     UI — TypeScript, Vite, no framework
-  main.ts                App shell: layout, keyboard shortcuts, palette, button/command bars, status strip
-  tabs.ts                Tab = one xterm.js terminal + one backend connection. TabManager: broadcast, tiling, drag-reorder
-  sidebar.ts             Session tree, filter, quick connect
-  editors.ts             Session editor, settings, button-bar editor, highlight editor
-  dialogs.ts             modal(), confirm/prompt/host-key/paste dialogs, context menus, toasts
+  main.ts                App shell: registers every command, builds menus/toolbar/tab strip/bars/status, workspace restore, close guard
+  commands.ts            Command registry: id, label, shortcut, enabled/checked, run. Chord parsing/matching/formatting
+  menu.ts                Drop-down/context menus (submenus, check marks, disabled, keyboard). `cmd(id)` turns a command into a menu item
+  menubar.ts             MenuBar (File/Edit/View/Session/Tools/Window/Help) and Toolbar (buttons bound to command ids)
+  omnibox.ts             The toolbar's "Connect to…" box: typed targets + saved-session suggestions + recents
+  tabs.ts                Tab = one xterm.js terminal + one backend connection, state banner, auto-reconnect, anti-idle.
+                         TabManager: broadcast, tiling, drag-reorder. Credential prompts are queued one at a time
+  sidebar.ts             Session manager: folder tree, filter, multi-select, drag-and-drop, inline rename, live LEDs
+  welcome.ts             No-tabs screen: recent sessions, detected serial ports, start actions (first run offers the importer)
+  editors.ts             Session options and Settings (category-list dialogs), protocol form, login-action steps,
+                         quick connect dialog, button editors, highlight editor
+  help.ts                Keyboard shortcuts sheet (generated from the registry), quick reference, about
+  dialogs.ts             modal(), confirm/prompt/host-key/paste dialogs, toasts (with optional Undo-style action)
   highlight.ts           Keyword highlighting via xterm decorations (never alters the stream)
-  quickconnect.ts        Parses typed targets (admin@host:22, COM3 9600, telnet ts 2003)
-  escapes.ts             Send-string escapes for buttons/scripts (\r \p ^C \xHH)
+  quickconnect.ts        Parses typed targets (admin@host:22, COM3 9600, telnet ts 2003) and ranks saved sessions
+  escapes.ts             Send-string escapes for buttons/command window (\r \p ^C \xHH) — mirrored in expect.rs
   schemes.ts             Terminal color schemes
-  state.ts               Loaded library (sessions, bars, highlights, settings) + change events
+  state.ts               Loaded library (sessions, folders, bars, highlights, settings, workspace/recents) + change events
   api.ts / types.ts      Typed wrappers for Tauri commands; mirror of the Rust model
   styles.css             All styling, design tokens at the top
 
 src-tauri/src/           Backend — Rust, Tauri 2
-  lib.rs                 Tauri commands and app setup. Thin: validate, delegate, map errors
-  conn.rs                Connection manager, Ctl messages, Output sink, CmdError (structured errors)
+  lib.rs                 Tauri commands and app setup. Thin: validate, delegate, map errors. Starts login actions on connect
+  conn.rs                Connection manager, Ctl messages, Output sink (+ login-action tap), CmdError (structured errors)
+  expect.rs              Login actions: send-string parser, {username}/{password}/{enable} tokens, prompt matcher, runner
   ssh.rs                 russh client: auth, keyboard-interactive, jump hosts, legacy algorithms, known_hosts
   telnet.rs              Telnet state machine (pure, unit tested) + raw TCP transport
   serial.rs              serialport transport, port listing, break
   local.rs               portable-pty local shells
-  store.rs               On-disk library: one TOML per session, settings, bars, highlights, defaults
-  secrets.rs             OS keychain via `keyring`
+  store.rs               On-disk library: one TOML per session, settings, bars, highlights, folders, workspace, defaults
+  secrets.rs             OS keychain via `keyring` (password, passphrase, enable)
   logger.rs              Session logs (raw or ANSI-stripped, timestamps, templates)
   import.rs              SecureCRT .ini session importer
   model.rs               Serde model shared with the UI (camelCase on the wire and on disk)
 src-tauri/tests/         Transport integration tests (SSH ones need a real server, opt-in)
-tests/                   Vitest unit tests for TS parsers
+tests/                   Vitest unit tests for TS parsers, shortcut handling and session ranking
+preview/                 Browser preview: fake Tauri APIs + a fake Cisco-ish device (see "Seeing the UI without Tauri")
 ```
+
+### How the UI is put together
+
+- **Every user-facing action is a `Command`** registered in `App.registerCommands()` (`main.ts`). Menus (`menus()`), the toolbar, the command palette, context menus (`cmd(id)` in `menu.ts`) and keyboard handling all read from the registry. To add an action: register it once, then place it in the menu it belongs to (and the toolbar or a context menu if it's everyday). Never wire a shortcut by hand.
+- **Shortcut rules:** app shortcuts are `Mod+Shift+letter` (Ctrl+Shift on Windows/Linux, ⌘ on macOS), F-keys, `Alt+Enter`, `Alt+1…9`. Never bind plain `Ctrl+letter` or `Alt+letter` — those belong to the device (^C, ^Z, ^Q flow control, Meta keys in shells). Two commands may share a chord when only one can be enabled at a time (Reconnect/Disconnect); the registry picks the enabled one. `Tab.keyFilter` keeps any registered chord away from xterm.
+- **Layout:** menu bar | toolbar (omnibox + command buttons) | session manager · splitter · workspace (tab strip, panes, command window, button bar) | status strip. Toolbar, session manager, button bar, command window and status bar can each be hidden from View (stored in Settings).
+- **Connection states are designed:** each pane has a banner (connecting after 600 ms, failed with Try again/Edit session, dropped with Reconnect, waiting-to-reconnect with Reconnect now/Stop). Messages also land in the terminal with a timestamp for the scrollback record.
+- **Session tree LEDs** mirror open tabs (best state wins when a session is open twice). The tree's selection model uses keys `s:<id>` / `f:<path>`.
+- **Folders** can be empty: explicit folders live in `folders.toml`; folders that only exist because sessions are in them are derived. Renames/moves go through `store.renameFolder()`.
+- **Workspace** (`workspace.toml`): open tabs (session snapshot, saved flag, custom title, broadcast membership), active tab, tiling, and recent session ids. Written debounced on change and on close. Restored at startup when `restoreWorkspace` is on. **Broadcast mode is never restored** — typing into many devices must always be a deliberate act.
+- **Prompts are queued:** when many tabs connect at once, password/host-key prompts appear one at a time and bring their tab to the front.
+
+### Login actions (expect/send)
+
+Stored per session as `loginSteps: [{expect, send, regex}]` plus `loginTimeoutSecs`. They run **in Rust** (`expect.rs`): `lib.rs` installs a tap on `Output` *before* the transport starts so the first prompt can't be missed, then spawns `expect::run`, which matches ANSI-stripped output (case-insensitive substring, or regex), sends the reply through the same `Ctl` channel as keystrokes, and removes the tap when done. Tokens `{username}`, `{password}`, `{enable}` are filled in from the session and the OS keychain *after* escape parsing, so secrets never reach the webview and are sent literally. An empty `expect` means "send once output has been quiet for 300 ms". The legacy `loginScript` (one command per line) still runs when `loginSteps` is empty; the editor converts it to steps on save. The send-string grammar exists twice (TS `escapes.ts`, Rust `expect::parse_send`) — change both and their tests together.
 
 ### How a connection works
 
@@ -84,6 +109,10 @@ tests/                   Vitest unit tests for TS parsers
 - **WebGL in background terminals on WebKitGTK** stopped repainting until focused. GPU rendering defaults off on Linux (`Settings.gpu_rendering`).
 - **A `<label>` wrapping buttons** forwards every click to the first button. `field()` only uses `<label>` for a single input/select/textarea; use `div.field` for anything else.
 - **Elements with `display` set in CSS ignore the `hidden` attribute** unless the global `[hidden] { display: none !important }` rule stays.
+- **Menus handle their own keys.** The menu container swallows navigation keys but must let Enter/Space through, or the focused item never clicks.
+- **Don't read app state while building chrome.** The toolbar and menus call command `enabled()/checked()` lazily; anything that runs during construction (before `TabManager` exists) must not call `refresh()`.
+- **`#[serde(rename)]` changes the JSON the UI sees, not just the TOML.** A rename meant to make `workspace.toml` read nicer broke startup in the real app while the preview (which fakes the JSON) looked fine. Model field names must match `types.ts`; `model.rs` has a test pinning the workspace's JSON names.
+- **The browser preview fakes the backend.** When you add or change a Tauri command, update `preview/core.ts` too, or the preview throws "doesn't fake … yet".
 
 ## Design
 
@@ -94,7 +123,7 @@ The visual language is called **Patch Bay**: graphite rack panels, console-cable
 - **Color carries meaning,** not decoration: blue = focus/selection/primary action, green = connected, amber = activity or "this affects many tabs" (broadcast), red = failure or destructive.
 - **Copy:** plain, specific, active voice. Buttons say what happens ("Save and connect", "Trust and connect", "Paste 12 lines"). Errors explain what went wrong and how to fix it, without apologizing. Empty states invite an action.
 - **Motion** only answers user actions or signals state (the LEDs). No decorative animation. Respect `prefers-reduced-motion`.
-- **Layout:** sidebar | tab strip + panes | button bar | status strip. Dialogs are for focused edits only; don't bury everyday actions in them.
+- **Layout:** menu bar | toolbar | session manager | tab strip + panes | command window | button bar | status strip. Dialogs are for focused edits only; don't bury everyday actions in them. Options dialogs use a category list on the left (`categories()` in `editors.ts`), never nested trees.
 - Before shipping UI, look at it in light and dark, at the minimum window size (720×420), and with a long session name.
 
 ## Code conventions
@@ -127,12 +156,37 @@ A change is done when:
 5. `CHANGELOG.md` has an entry under "Unreleased" for anything user-visible.
 6. `ROADMAP.md` is updated if a roadmap item changed status.
 
+## Developing and seeing your work
+
+**Toolchain.** The owner's machine is Fedora (immutable-style: no compiler on the host). Build inside the `fedora-toolbox-44` toolbox. One-time setup, which needs the owner's sudo password:
+
+```sh
+toolbox run -c fedora-toolbox-44 sudo dnf install -y gcc gcc-c++ webkit2gtk4.1-devel openssl-devel libudev-devel systemd-devel libsoup3-devel javascript-coregtk4.1-devel gtk3-devel librsvg2-devel libappindicator-gtk3-devel
+```
+
+Node 22 lives per-user at `~/.local/opt/node-v22.20.0-linux-x64/bin` and Rust via rustup in `~/.cargo/bin` (neither is on the default PATH; prefix commands with `export PATH=~/.local/opt/node-v22.20.0-linux-x64/bin:~/.cargo/bin:$PATH`). Cargo builds go through `toolbox run -c fedora-toolbox-44 …` once the packages above are installed.
+
+**Testing Rust before those packages exist.** Without a C compiler nothing links. A stopgap that works without root: download Zig into a scratch directory and put a `cc` wrapper on PATH that runs `zig cc -target x86_64-linux-gnu.2.34`, then build a scratch crate that symlinks the Tauri-free modules (`conn`, `expect`, `logger`, `model`, `store`, `telnet`) with the same dependency versions and `Cargo.lock`. That runs their unit tests and clippy. It can't build `lib.rs`, `ssh.rs`, `serial.rs`, `local.rs` or `secrets.rs` (they need Tauri, libudev or D-Bus), so review those by eye and say so.
+
+**Formatting.** `src-tauri/rustfmt.toml` sets 120 columns with `use_small_heuristics = "Max"` to keep the dense style; run `cargo fmt` (or `rustfmt --edition 2021 src/*.rs tests/*.rs`) before finishing.
+
+**Seeing the real app.** GNOME blocks screenshot tools on Wayland, but the app can run under XWayland: launch with `GDK_BACKEND=x11 TETHER_HOME=<scratch dir> ./src-tauri/target/release/tether`, find the window with `xprop -root _NET_CLIENT_LIST` + `xprop -id <id> WM_NAME`, and capture it with ImageMagick's `import -window <id> out.png` (host tools). Seed `<scratch dir>/sessions/*.toml` and `workspace.toml` to exercise restore and connections without clicking — a local-shell session with a login step (`expect = "$"`) proves the login engine end to end. For SSH tests, a non-root `/usr/sbin/sshd -f <config>` on 127.0.0.1:2222 with `UsePAM no`, `StrictModes no` and its own host key supports the key-based opt-in tests; the password tests need a real account password.
+
+**Seeing the UI without Tauri.** `npm run preview:ui` serves the real UI on http://localhost:1421 with the Tauri APIs swapped for in-memory fakes (`preview/`). It seeds a realistic session library, fakes a Cisco-ish device (echo, `show ip int brief`, `show interfaces status`, `show logging`…) and a few scripted situations: `edge-fw1` asks for a password, `lab-router (new key)` shows the host-key prompt, `lab-unreachable` fails to connect. Add `?empty` for a first-run library and `?theme=light` for the light theme. Use it to look at every UI change; screenshot it headlessly with Playwright (keep Playwright in your scratch directory, not in the repo). The preview never exercises Rust — login actions, logging and real transports still need `npm run tauri dev` and the Rust tests.
+
+## Status
+
+Keep this current: it's how the next worker knows where things stand. Newest first.
+
+- **2026-10-20 (later) — built and verified on the owner's machine.** Full `cargo clippy --all-targets` clean (fixed two older warnings in `import.rs`/`ssh.rs`), `cargo fmt --check` clean, `cargo test` 28 passed, release build OK. Added a size-focused `[profile.release]` (LTO, strip): binary 28 MB → 10.4 MB. Running the real app found a startup crash (workspace JSON field renamed by serde) — fixed with a regression test. Verified in the real app: workspace restore, local-shell connection, login action sent by the Rust engine. Opt-in SSH tests `ssh_encrypted_key` and `ssh_changed_host_key_is_blocked` pass against a local sshd. **Still unverified:** the password-based SSH tests (need a real account password), login actions against real network gear, Windows and macOS.
+- **2026-10-20 — UI overhaul + roadmap items 1 and 2 (uncommitted until the owner pushes).** Command registry, menu bar, toolbar with quick-connect box, rebuilt session manager (folders incl. empty ones, multi-select, drag-and-drop, inline rename, LEDs), state banners, welcome screen, category-list Session options and Settings, quick connect dialog, button-bar inline editing, palette ranking, shortcuts sheet, quick reference, about. Expect/send login actions (Rust engine, templates, enable password in keychain, non-SSH login username). Restore workspace and recent sessions. Auto-reconnect and anti-idle per session. Per-session color scheme. Confirm before quitting with live tabs. `tsc`, Vitest (14 tests) and a production `vite build` pass; the UI was reviewed in the browser preview in dark, light, at 720×420 and with long names. Rust: the Tauri-free modules (expect, model, store, conn, logger, telnet) compile clippy-clean and their 22 unit tests pass via the Zig stopgap; the crate was formatted with the new `rustfmt.toml`. **Not yet verified:** a full `cargo clippy`/`cargo test` of the whole crate (`lib.rs` and the SSH/serial/local transports were reviewed by eye only), a real `npm run tauri dev` session, login actions against real gear, and the opt-in SSH tests.
+
 ## Priorities
 
 Work the roadmap in this order unless the owner says otherwise. Each item should land complete and polished.
 
-1. **Expect/send login scripts** — wait for a prompt pattern, then send; timeouts; works with enable passwords and console-server hops.
-2. **Restore workspace** — reopen last session's tabs, tiling and broadcast state.
+1. ~~Expect/send login scripts~~ — built (see Status); verify against real gear.
+2. ~~Restore workspace~~ — built: tabs, titles, tiling, broadcast membership (broadcast mode itself deliberately starts off).
 3. **SFTP pane** for SSH tabs with drag-and-drop upload/download.
 4. **Port forwarding** (local, remote, dynamic/SOCKS) per session.
 5. **SSH agent** support (Windows OpenSSH agent / Pageant, ssh-agent) and agent forwarding.
@@ -142,7 +196,7 @@ Work the roadmap in this order unless the owner says otherwise. Each item should
 9. **Auto-update** via the Tauri updater plugin, signed, fed from GitHub Releases.
 10. **Scripting API** (sandboxed JS first) over the connection layer.
 
-Smaller polish items worth picking up between features: session drag-and-drop between folders, multi-select in the tree, keyboard-only navigation audit, keymap editor, per-session color scheme, a "copy as plain text / copy with colors" option, and a first-run welcome that offers the SecureCRT import.
+Smaller polish items worth picking up between features: keyboard-only navigation audit, keymap editor (the command registry makes this straightforward), a "copy as plain text / copy with colors" option, session import/export as a zip, a per-tab "lock" that ignores typing, and keyword-triggered actions. Done already: drag-and-drop between folders, multi-select, per-session color scheme, first-run welcome with the SecureCRT import.
 
 ## Releasing
 

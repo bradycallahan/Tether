@@ -33,3 +33,5 @@ pub fn delete(session_id: &str, kind: &str) -> Result<()> {
 
 pub const PASSWORD: &str = "password";
 pub const PASSPHRASE: &str = "passphrase";
+/// Secondary password for login actions, e.g. a Cisco enable secret.
+pub const ENABLE: &str = "enable";

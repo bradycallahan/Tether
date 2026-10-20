@@ -8,13 +8,15 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import "@xterm/xterm/css/xterm.css";
 
 import { api } from "./api";
+import { commands, isMac } from "./commands";
 import { h, icon } from "./dom";
-import { confirmDialog, hostKeyDialog, pasteConfirm, promptSecret, promptText, showMenu, toast } from "./dialogs";
+import { confirmDialog, hostKeyDialog, pasteConfirm, promptSecret, promptText, toast } from "./dialogs";
 import { Highlighter } from "./highlight";
+import { showMenu, type MenuEntry } from "./menu";
 import { scheme } from "./schemes";
 import { store } from "./state";
 import { playSendString } from "./escapes";
-import { hostLabel, type CmdError, type Session, type StatusEvent } from "./types";
+import { hostLabel, PROTOCOL_NAMES, type CmdError, type Session, type StatusEvent } from "./types";
 
 export type TabState = "idle" | "connecting" | "connected" | "closed";
 
@@ -33,9 +35,21 @@ export interface TabHost {
   tabMenu(tab: Tab, x: number, y: number): void;
   isVisible(tab: Tab): boolean;
   editSession(tab: Tab): void;
+  /** Where input typed in this tab goes, e.g. "core-sw1" or "6 tabs". */
+  targetLabel(tab: Tab): { label: string; many: boolean };
 }
 
-const isMac = navigator.platform.toUpperCase().includes("MAC");
+/** Waits between automatic reconnect attempts, in seconds. */
+const RECONNECT_BACKOFF = [3, 5, 10, 20, 30];
+
+// Credential and host-key prompts are shown one at a time, even when many
+// tabs connect at once (restoring a workspace, "Connect to all").
+let promptChain: Promise<unknown> = Promise.resolve();
+function oneAtATime<T>(fn: () => Promise<T>): Promise<T> {
+  const run = promptChain.then(fn, fn);
+  promptChain = run.catch(() => {});
+  return run;
+}
 
 export class Tab {
   readonly connId = crypto.randomUUID();
@@ -44,6 +58,9 @@ export class Tab {
   logPath: string | null = null;
   inBroadcast = true;
   title: string;
+  /** Set when the user renamed the tab, so session edits don't overwrite it. */
+  customTitle = false;
+  connectedAt: number | null = null;
 
   readonly term: Terminal;
   readonly fit = new FitAddon();
@@ -53,14 +70,23 @@ export class Tab {
   readonly tabEl: HTMLDivElement;
   private led: HTMLSpanElement;
   private paneLed: HTMLSpanElement;
+  private paneTitle: HTMLSpanElement;
   private titleEl: HTMLSpanElement;
   private bcEl: HTMLSpanElement;
   private termEl: HTMLDivElement;
+  private banner: HTMLDivElement;
   private findBar: HTMLDivElement | null = null;
   private seq = 0;
   private lastPulse = 0;
   private resizeObs: ResizeObserver;
   private fitQueued = false;
+  private reconnectTimer: number | undefined;
+  private reconnectAttempt = 0;
+  private bannerTimer: number | undefined;
+  private idleTimer: number | undefined;
+  /** The user asked for this disconnect, so don't auto-reconnect. */
+  private userClosed = false;
+  private lastError: string | null = null;
 
   constructor(public session: Session, public saved: boolean, private host: TabHost) {
     this.title = session.name || hostLabel(session.protocol);
@@ -73,7 +99,7 @@ export class Tab {
       cursorStyle: s.cursorStyle,
       cursorBlink: s.cursorBlink,
       scrollback: s.scrollback,
-      theme: scheme(s.terminalScheme),
+      theme: scheme(session.terminal.colorScheme ?? s.terminalScheme),
       macOptionIsMeta: true,
       rightClickSelectsWord: false,
       drawBoldTextInBrightColors: true,
@@ -83,11 +109,22 @@ export class Tab {
     this.applyHighlightSet();
 
     this.termEl = h("div", { class: "term" });
+    this.banner = h("div", { class: "banner", hidden: true, role: "status" });
     this.paneLed = h("span", { class: "led" });
-    this.pane = h("div", { class: "pane" }, h("div", { class: "pane-label" }, this.paneLed, this.title), this.termEl);
+    this.paneTitle = h("span", {}, this.title);
+    this.pane = h("div", { class: "pane" }, h("div", { class: "pane-label" }, this.paneLed, this.paneTitle), this.banner, h("div", { class: "term-wrap" }, this.termEl));
     this.led = h("span", { class: "led" });
     this.titleEl = h("span", { class: "title" }, this.title);
-    this.bcEl = h("span", { class: "bc on", title: "Include in broadcast", onclick: (e: Event) => { e.stopPropagation(); this.setBroadcastMember(!this.inBroadcast); } }, "✓");
+    this.bcEl = h("span", {
+      class: "bc on",
+      role: "checkbox",
+      "aria-checked": "true",
+      title: "Include this tab when broadcasting",
+      onclick: (e: Event) => {
+        e.stopPropagation();
+        this.setBroadcastMember(!this.inBroadcast);
+      },
+    }, icon("check"));
     this.tabEl = h(
       "div",
       {
@@ -95,17 +132,34 @@ export class Tab {
         role: "tab",
         tabindex: "0",
         draggable: "true",
-        title: hostLabel(session.protocol),
         onclick: () => host.activate(this),
-        onauxclick: (e: MouseEvent) => { if (e.button === 1) host.close(this); },
-        oncontextmenu: (e: MouseEvent) => { e.preventDefault(); host.tabMenu(this, e.clientX, e.clientY); },
-        onkeydown: (e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") host.activate(this); },
+        onauxclick: (e: MouseEvent) => {
+          if (e.button === 1) host.close(this);
+        },
+        oncontextmenu: (e: MouseEvent) => {
+          e.preventDefault();
+          host.tabMenu(this, e.clientX, e.clientY);
+        },
+        onkeydown: (e: KeyboardEvent) => {
+          if (e.key === "Enter" || e.key === " ") host.activate(this);
+        },
       },
       this.led,
       this.bcEl,
       this.titleEl,
-      h("span", { class: "x", title: "Close tab", onclick: (e: Event) => { e.stopPropagation(); host.close(this); } }, icon("close")),
+      h("button", {
+        type: "button",
+        class: "x",
+        title: "Close tab",
+        tabindex: "-1",
+        onclick: (e: Event) => {
+          e.stopPropagation();
+          host.close(this);
+        },
+      }, icon("close")),
     );
+    this.applyTag();
+    this.pane.classList.add("bc-member");
     this.pane.addEventListener("pointerdown", () => host.activate(this));
 
     this.resizeObs = new ResizeObserver(() => this.fitSoon());
@@ -116,17 +170,21 @@ export class Tab {
     const t = this.term;
     t.loadAddon(this.fit);
     t.loadAddon(this.search);
-    t.loadAddon(new WebLinksAddon((e, uri) => { if (e.ctrlKey || e.metaKey) openUrl(uri).catch(() => {}); }));
+    t.loadAddon(new WebLinksAddon((e, uri) => {
+      if (e.ctrlKey || e.metaKey) openUrl(uri).catch(() => {});
+    }));
     const uni = new Unicode11Addon();
     t.loadAddon(uni);
     t.unicode.activeVersion = "11";
     t.open(this.termEl);
-    if (store.settings.gpuRendering) try {
-      const gl = new WebglAddon();
-      gl.onContextLoss(() => gl.dispose());
-      t.loadAddon(gl);
-    } catch {
-      // Fall back to the DOM renderer.
+    if (store.settings.gpuRendering) {
+      try {
+        const gl = new WebglAddon();
+        gl.onContextLoss(() => gl.dispose());
+        t.loadAddon(gl);
+      } catch {
+        // Fall back to the DOM renderer.
+      }
     }
 
     t.onData((d) => this.host.input(this, d));
@@ -135,10 +193,10 @@ export class Tab {
     });
     t.onResize(({ cols, rows }) => {
       if (this.state === "connected") api.resize(this.connId, cols, rows);
+      this.host.changed(this);
     });
     t.onBell(() => {
-      const mode = store.settings.bell;
-      if (mode === "visual") {
+      if (store.settings.bell === "visual") {
         this.pane.classList.remove("bell");
         void this.pane.offsetWidth;
         this.pane.classList.add("bell");
@@ -156,8 +214,7 @@ export class Tab {
       (e) => {
         e.preventDefault();
         e.stopImmediatePropagation();
-        const text = e.clipboardData?.getData("text/plain") ?? "";
-        this.paste(text);
+        this.paste(e.clipboardData?.getData("text/plain") ?? "");
       },
       true,
     );
@@ -165,13 +222,13 @@ export class Tab {
       e.preventDefault();
       if (store.settings.rightClickPaste) {
         if (t.hasSelection()) {
-          navigator.clipboard.writeText(t.getSelection()).catch(() => {});
+          this.copySelection();
           t.clearSelection();
         } else {
           this.pasteFromClipboard();
         }
       } else {
-        this.host.tabMenu(this, e.clientX, e.clientY);
+        this.terminalMenu(e.clientX, e.clientY);
       }
     });
     this.resizeObs.observe(this.termEl);
@@ -180,16 +237,11 @@ export class Tab {
 
   private keyFilter(e: KeyboardEvent): boolean {
     if (e.type !== "keydown") return true;
-    const mod = isMac ? e.metaKey : e.ctrlKey;
-    // Shortcuts the app handles: let them bubble out of xterm.
-    if (mod && e.shiftKey && /^[A-Z]$/i.test(e.key)) return false;
-    if (e.ctrlKey && (e.key === "Tab" || e.key === "PageUp" || e.key === "PageDown")) return false;
-    if (e.altKey && /^[1-9]$/.test(e.key) && !isMac) return false;
-    if (mod && (e.key === "," || e.key === "=" || e.key === "+" || e.key === "-" || e.key === "0")) return false;
-    if (isMac && e.metaKey && ["t", "w", "f", "k"].includes(e.key.toLowerCase())) return false;
+    // App shortcuts never reach the device.
+    if (commands.match(e)) return false;
     // Ctrl+C copies when something is selected (sends ^C otherwise).
-    if (!isMac && e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === "c" && this.term.hasSelection()) {
-      navigator.clipboard.writeText(this.term.getSelection()).catch(() => {});
+    if (!isMac && e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "c" && this.term.hasSelection()) {
+      this.copySelection();
       this.term.clearSelection();
       return false;
     }
@@ -198,6 +250,23 @@ export class Tab {
       return false;
     }
     return true;
+  }
+
+  private terminalMenu(x: number, y: number) {
+    const entries: MenuEntry[] = [
+      { label: "Copy", icon: "copy", shortcut: commands.shortcut("edit.copy"), disabled: !this.term.hasSelection(), action: () => this.copySelection() },
+      { label: "Paste", icon: "paste", shortcut: commands.shortcut("edit.paste"), action: () => this.pasteFromClipboard() },
+      { label: "Select all", shortcut: commands.shortcut("edit.selectAll"), action: () => this.term.selectAll() },
+      "-",
+      { label: "Find…", icon: "search", shortcut: commands.shortcut("edit.find"), action: () => this.openFind() },
+      { label: "Clear scrollback", icon: "eraser", action: () => this.clearScrollback() },
+    ];
+    showMenu(x, y, entries);
+  }
+
+  copySelection() {
+    if (!this.term.hasSelection()) return;
+    navigator.clipboard.writeText(this.term.getSelection()).catch(() => toast("Couldn't write to the clipboard."));
   }
 
   async pasteFromClipboard() {
@@ -213,7 +282,7 @@ export class Tab {
     const normalized = text.replace(/\r\n|\n/g, "\r");
     const lines = normalized.split("\r").filter((l, i, a) => l.length > 0 || i < a.length - 1).length;
     if (store.settings.confirmMultilinePaste && lines > 1) {
-      if (!(await pasteConfirm(text))) {
+      if (!(await pasteConfirm(text, this.host.targetLabel(this)))) {
         this.focus();
         return;
       }
@@ -221,6 +290,11 @@ export class Tab {
     this.focus();
     const data = this.term.modes.bracketedPasteMode ? `\x1b[200~${normalized}\x1b[201~` : normalized;
     this.host.input(this, data);
+  }
+
+  clearScrollback() {
+    this.term.clear();
+    this.highlighter.clear();
   }
 
   fitSoon() {
@@ -250,8 +324,8 @@ export class Tab {
     o.cursorStyle = s.cursorStyle;
     o.cursorBlink = s.cursorBlink;
     o.scrollback = s.scrollback;
-    o.theme = scheme(s.terminalScheme);
-    this.pane.style.background = (o.theme.background as string) ?? "";
+    o.theme = scheme(this.session.terminal.colorScheme ?? s.terminalScheme);
+    this.pane.style.setProperty("--term-bg", (o.theme.background as string) ?? "");
     this.applyHighlightSet();
     this.fitSoon();
   }
@@ -262,17 +336,40 @@ export class Tab {
     this.highlighter.setRules(set?.rules ?? []);
   }
 
-  setTitle(title: string) {
+  /** Pick up edits made to the saved session. */
+  updateSession(s: Session) {
+    this.session = structuredClone(s);
+    this.saved = true;
+    if (!this.customTitle) this.setTitle(s.name, false);
+    this.applyTag();
+    this.applySettings();
+    this.scheduleAntiIdle();
+  }
+
+  private applyTag() {
+    this.tabEl.style.setProperty("--tag", this.session.colorTag ?? "transparent");
+    this.tabEl.classList.toggle("tagged", !!this.session.colorTag);
+    this.updateTooltip();
+  }
+
+  private updateTooltip() {
+    this.tabEl.title = `${this.title}\n${PROTOCOL_NAMES[this.session.protocol.kind]} ${hostLabel(this.session.protocol)}\n${this.statusMessage}`;
+  }
+
+  setTitle(title: string, custom = true) {
     this.title = title;
+    this.customTitle = custom;
     this.titleEl.textContent = title;
-    const label = this.pane.querySelector(".pane-label");
-    if (label) label.lastChild!.textContent = title;
+    this.paneTitle.textContent = title;
+    this.updateTooltip();
     this.host.changed(this);
   }
 
   setBroadcastMember(on: boolean) {
     this.inBroadcast = on;
     this.bcEl.classList.toggle("on", on);
+    this.pane.classList.toggle("bc-member", on);
+    this.bcEl.setAttribute("aria-checked", String(on));
     this.host.changed(this);
   }
 
@@ -287,10 +384,63 @@ export class Tab {
   }
 
   private setState(state: TabState, message: string) {
+    const was = this.state;
     this.state = state;
     this.statusMessage = message;
     for (const led of [this.led, this.paneLed]) led.className = `led ${state === "idle" ? "" : state}`;
+    if (state === "connected" && was !== "connected") this.connectedAt = Date.now();
+    if (state !== "connected") this.connectedAt = null;
+    this.updateTooltip();
+    this.renderBanner();
     this.host.changed(this);
+  }
+
+  // ---------- banner ----------
+
+  private renderBanner() {
+    clearTimeout(this.bannerTimer);
+    const b = this.banner;
+    const show = (kind: string, text: string, ...buttons: HTMLElement[]) => {
+      b.className = `banner ${kind}`;
+      b.replaceChildren(h("span", { class: "led" }), h("span", { class: "text" }, text), ...buttons);
+      if (b.hidden) {
+        b.hidden = false;
+        this.fitSoon();
+      }
+    };
+    const btn = (label: string, onclick: () => void, primary = false, kbd?: string) =>
+      h("button", { type: "button", class: `btn ${primary ? "primary" : "ghost"}`, onclick: (e: Event) => { e.stopPropagation(); onclick(); } }, label, kbd ? h("span", { class: "kbd" }, kbd) : null);
+
+    if (this.state === "connected" || this.state === "idle") {
+      if (!b.hidden) {
+        b.hidden = true;
+        this.fitSoon();
+      }
+      return;
+    }
+    if (this.state === "connecting") {
+      // Fast connects shouldn't flash a banner.
+      const render = () => show("connecting", this.statusMessage, btn("Cancel", () => this.disconnect()));
+      if (b.hidden) this.bannerTimer = window.setTimeout(render, 600);
+      else render();
+      return;
+    }
+    // closed
+    if (this.reconnectTimer !== undefined) {
+      const wait = RECONNECT_BACKOFF[Math.min(this.reconnectAttempt, RECONNECT_BACKOFF.length - 1)];
+      show("waiting", `${this.lastError ?? this.statusMessage} Reconnecting in ${wait} s…`,
+        btn("Reconnect now", () => this.reconnectNow(), true),
+        btn("Stop", () => this.cancelAutoReconnect()));
+      return;
+    }
+    const enter = store.settings.reconnectOnEnter ? "Enter" : undefined;
+    if (this.lastError) {
+      show("fault", this.lastError,
+        btn("Try again", () => this.reconnectNow(), true, enter),
+        ...(this.saved || this.session.protocol.kind !== "local" ? [btn(this.saved ? "Edit session…" : "Save as session…", () => this.host.editSession(this))] : []));
+    } else {
+      show("closed", this.statusMessage, btn("Reconnect", () => this.reconnectNow(), true, enter));
+    }
   }
 
   private lastInfo = "";
@@ -314,6 +464,7 @@ export class Tab {
     if (this.state !== "connected") return;
     this.outbox += this.session.terminal.backspaceSendsDelete ? data : data.replace(/\x7f/g, "\b");
     if (!this.flushing) this.flush();
+    this.scheduleAntiIdle();
   }
 
   private async flush() {
@@ -329,22 +480,40 @@ export class Tab {
     }
   }
 
+  /** Keep idle-timeout-happy devices from logging us out. */
+  private scheduleAntiIdle() {
+    clearTimeout(this.idleTimer);
+    const secs = this.session.antiIdleSecs;
+    if (!secs || !this.session.antiIdleSend || this.state !== "connected") return;
+    this.idleTimer = window.setTimeout(() => {
+      if (this.state !== "connected") return;
+      playSendString(this.session.antiIdleSend, (s) => this.send(s));
+    }, secs * 1000);
+  }
+
   /** Raw keyboard input routed back from the manager when not connected. */
   idleInput(data: string) {
-    if ((this.state === "closed" || this.state === "idle") && data === "\r" && store.settings.reconnectOnEnter) {
-      this.connect();
-    }
+    if (data !== "\r" || !store.settings.reconnectOnEnter) return;
+    if (this.state === "closed" || this.state === "idle") this.reconnectNow();
   }
 
   /** Secrets typed this session, reused for reconnects until the tab closes. */
   private typed: ConnectOpts = {};
 
+  /** A cloned tab reuses the passwords typed into the original. */
+  inheritCredentials(from: Tab) {
+    this.typed = { ...from.typed };
+  }
+
   async connect(given: ConnectOpts = {}): Promise<void> {
     const opts: ConnectOpts = { ...this.typed, ...given };
     const seq = ++this.seq;
+    this.userClosed = false;
+    this.lastError = null;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
     if (this.state === "connected") api.disconnect(this.connId);
     this.setState("connecting", `Connecting to ${hostLabel(this.session.protocol)}…`);
-    const fresh = this.seq;
     try {
       const info = await api.connect(
         {
@@ -365,14 +534,15 @@ export class Tab {
           if (seq === this.seq) this.onStatus(ev);
         },
       );
-      if (fresh !== this.seq) return;
+      if (seq !== this.seq) return;
       this.typed = { password: opts.password, passphrase: opts.passphrase, jumpPassword: opts.jumpPassword };
       this.logPath = info.logPath;
+      this.reconnectAttempt = 0;
       if (this.state !== "connected") this.setState("connected", `Connected to ${hostLabel(this.session.protocol)}`);
       api.resize(this.connId, this.term.cols, this.term.rows);
-      this.runLoginScript();
+      this.scheduleAntiIdle();
     } catch (raw) {
-      if (fresh !== this.seq) return;
+      if (seq !== this.seq) return;
       await this.handleError(raw as CmdError, opts);
     }
   }
@@ -381,50 +551,62 @@ export class Tab {
     const code = e?.code ?? "ERROR";
     const message = e?.message ?? String(e);
     const retry = (extra: ConnectOpts) => this.connect({ ...opts, ...extra });
+    // Prompts wait their turn and bring their tab forward, so it's clear
+    // which device is asking.
+    const ask = <T>(fn: () => Promise<T>) =>
+      oneAtATime(async () => {
+        this.host.activate(this);
+        return fn();
+      });
     switch (code) {
       case "NEED_PASSWORD":
       case "AUTH_FAILED": {
         if (code === "AUTH_FAILED") this.typed = {};
         const jump = e.detail?.target === "jump";
         const failed = code === "AUTH_FAILED";
-        const r = await promptSecret({
-          title: jump ? "Jump host password" : "Password",
-          label: failed ? `Password for ${hostLabel(this.session.protocol)}` : message,
-          error: failed ? (e.detail?.usedSaved ? "The saved password was rejected. Enter the current one." : "That password didn't work.") : undefined,
-          allowRemember: this.saved,
-        });
-        if (!r) return this.fail(failed ? message : "Cancelled.");
+        const r = await ask(() =>
+          promptSecret({
+            title: jump ? `Jump host password for ${this.title}` : `Password for ${this.title}`,
+            label: failed ? `Password for ${hostLabel(this.session.protocol)}` : message,
+            error: failed ? (e.detail?.usedSaved ? "The saved password was rejected. Enter the current one." : "That password didn't work.") : undefined,
+            allowRemember: this.saved,
+          }),
+        );
+        if (!r) return this.fail(failed ? message : "Connection cancelled.");
         return retry(jump ? { jumpPassword: r.value, remember: r.remember } : { password: r.value, remember: r.remember });
       }
       case "NEED_PASSPHRASE": {
-        const r = await promptSecret({ title: "Key passphrase", label: message, allowRemember: this.saved, error: opts.passphrase ? "That passphrase didn't work." : undefined });
-        if (!r) return this.fail("Cancelled.");
+        const r = await ask(() =>
+          promptSecret({ title: `Key passphrase for ${this.title}`, label: message, allowRemember: this.saved, error: opts.passphrase ? "That passphrase didn't work." : undefined }),
+        );
+        if (!r) return this.fail("Connection cancelled.");
         return retry({ passphrase: r.value, remember: r.remember });
       }
       case "NEED_USERNAME": {
-        const user = await promptText({ title: "Username", label: `Log in to ${hostLabel(this.session.protocol)} as`, confirm: "Connect" });
-        if (!user || this.session.protocol.kind !== "ssh") return this.fail("Cancelled.");
+        const user = await ask(() => promptText({ title: `Username for ${this.title}`, label: `Log in to ${hostLabel(this.session.protocol)} as`, confirm: "Connect" }));
+        if (!user || this.session.protocol.kind !== "ssh") return this.fail("Connection cancelled.");
         this.session = { ...this.session, protocol: { ...this.session.protocol, username: user } };
-        this.tabEl.title = hostLabel(this.session.protocol);
+        this.updateTooltip();
         return retry({});
       }
       case "HOSTKEY_UNKNOWN":
       case "HOSTKEY_CHANGED": {
         const changed = code === "HOSTKEY_CHANGED";
-        const ok = await hostKeyDialog(e.detail ?? {}, changed);
+        const ok = await ask(() => hostKeyDialog(e.detail ?? {}, changed));
         if (!ok) return this.fail(changed ? "Stopped: the host key changed." : "Host key not trusted.");
         await api.trustHostKey(String(e.detail!.host), Number(e.detail!.port), String(e.detail!.key), changed);
         return retry({});
       }
       default:
-        return this.fail(message);
+        this.fail(message, true);
     }
   }
 
-  private fail(message: string) {
-    this.setState("closed", message);
+  private fail(message: string, canAutoRetry = false) {
+    this.lastError = message;
     this.info(`✗ ${message}`, "31");
-    if (store.settings.reconnectOnEnter) this.info("Press Enter to try again.");
+    if (canAutoRetry && this.session.autoReconnect && !this.userClosed) this.scheduleReconnect();
+    this.setState("closed", message);
     this.focus();
   }
 
@@ -437,18 +619,44 @@ export class Tab {
       case "connected":
         this.setState("connected", ev.message);
         break;
-      case "closed":
+      case "closed": {
         if (this.state === "closed") return;
-        this.setState("closed", ev.message);
+        clearTimeout(this.idleTimer);
         this.logPath = null;
-        this.info(`— ${ev.message}${store.settings.reconnectOnEnter ? " Press Enter to reconnect." : ""}`, "33");
+        this.info(`— ${ev.message} ${new Date().toLocaleTimeString()}`, "33");
+        if (this.session.autoReconnect && !this.userClosed) this.scheduleReconnect();
+        this.setState("closed", ev.message);
         break;
+      }
       case "warning":
         this.info(ev.message, "33");
         break;
       case "error":
         break; // reported by the connect() rejection
     }
+  }
+
+  private scheduleReconnect() {
+    clearTimeout(this.reconnectTimer);
+    const wait = RECONNECT_BACKOFF[Math.min(this.reconnectAttempt, RECONNECT_BACKOFF.length - 1)];
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = undefined;
+      this.reconnectAttempt++;
+      this.connect();
+    }, wait * 1000);
+  }
+
+  private cancelAutoReconnect() {
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
+    this.reconnectAttempt = 0;
+    this.renderBanner();
+  }
+
+  /** Connect now, skipping any pending automatic retry. */
+  reconnectNow() {
+    this.reconnectAttempt = 0;
+    this.connect();
   }
 
   private onData(bytes: Uint8Array) {
@@ -462,39 +670,37 @@ export class Tab {
     if (!this.host.isVisible(this)) this.tabEl.classList.add("unread");
   }
 
-  private async runLoginScript() {
-    const script = this.session.loginScript.trim();
-    if (!script) return;
-    await new Promise((r) => setTimeout(r, 600));
-    for (const line of script.split(/\r?\n/)) {
-      if (this.state !== "connected") return;
-      if (!line.trim()) continue;
-      await playSendString(line.endsWith("\\r") || line.endsWith("\\n") ? line : line + "\\r", (s) => this.send(s));
-      await new Promise((r) => setTimeout(r, 400));
-    }
-  }
-
   disconnect() {
     this.seq++;
+    this.userClosed = true;
+    clearTimeout(this.reconnectTimer);
+    clearTimeout(this.idleTimer);
+    this.reconnectTimer = undefined;
     api.disconnect(this.connId);
     if (this.state === "connected" || this.state === "connecting") {
+      this.lastError = null;
+      this.info(`— Disconnected. ${new Date().toLocaleTimeString()}`, "33");
       this.setState("closed", "Disconnected.");
-      this.info(`— Disconnected.${store.settings.reconnectOnEnter ? " Press Enter to reconnect." : ""}`, "33");
+    } else {
+      this.renderBanner();
     }
     this.logPath = null;
   }
 
   sendBreak() {
     if (this.state !== "connected") return;
-    api.sendBreak(this.connId);
     const k = this.session.protocol.kind;
-    if (k === "serial" || k === "telnet") toast("Break sent");
-    else toast("Break isn't available on this connection type.");
+    if (k !== "serial" && k !== "telnet") {
+      toast(`Break isn't available over ${PROTOCOL_NAMES[k]}.`);
+      return;
+    }
+    api.sendBreak(this.connId);
+    toast("Break sent");
   }
 
   async toggleLogging() {
     if (this.state !== "connected") {
-      toast("Connect first, or turn on logging in the session settings.");
+      toast("Connect first, or turn on logging in the session options.");
       return;
     }
     try {
@@ -524,14 +730,19 @@ export class Tab {
     };
     const opts = () => ({ caseSensitive: caseBtn.getAttribute("aria-pressed") === "true", decorations: deco });
     const find = (back = false) => {
-      if (!input.value) return;
+      if (!input.value) {
+        count.textContent = "";
+        this.search.clearDecorations();
+        return;
+      }
       if (back) this.search.findPrevious(input.value, opts());
       else this.search.findNext(input.value, opts());
     };
-    this.search.onDidChangeResults(({ resultIndex, resultCount }) => {
+    const sub = this.search.onDidChangeResults(({ resultIndex, resultCount }) => {
       count.textContent = resultCount === 0 ? "No results" : `${resultIndex + 1} of ${resultCount}`;
     });
     const close = () => {
+      sub.dispose();
       this.search.clearDecorations();
       this.findBar?.remove();
       this.findBar = null;
@@ -559,11 +770,21 @@ export class Tab {
       h("button", { type: "button", class: "btn ghost icon-only", title: "Close (Esc)", onclick: close }, icon("close")),
     );
     this.pane.append(this.findBar);
+    const sel = this.term.getSelection();
+    if (sel && !sel.includes("\n")) {
+      input.value = sel;
+      find();
+    }
     input.focus();
+    input.select();
   }
 
   dispose() {
     this.seq++;
+    this.userClosed = true;
+    clearTimeout(this.reconnectTimer);
+    clearTimeout(this.idleTimer);
+    clearTimeout(this.bannerTimer);
     api.disconnect(this.connId);
     this.resizeObs.disconnect();
     this.highlighter.dispose();
@@ -574,6 +795,12 @@ export class Tab {
 }
 
 // ---------------------------------------------------------------------------
+
+export interface TabManagerHooks {
+  changed(): void;
+  editSession(tab: Tab): void;
+  tabMenu(tab: Tab, x: number, y: number): void;
+}
 
 export class TabManager implements TabHost {
   tabs: Tab[] = [];
@@ -587,8 +814,7 @@ export class TabManager implements TabHost {
     private stripEl: HTMLElement,
     private panesEl: HTMLElement,
     private emptyEl: HTMLElement,
-    private onChange: () => void,
-    private onEditSession: (tab: Tab) => void,
+    private hooks: TabManagerHooks,
   ) {
     tabsEl.addEventListener("dragover", (e) => {
       if (!this.dragTab) return;
@@ -599,11 +825,13 @@ export class TabManager implements TabHost {
       const after = e.clientX > r.left + r.width / 2;
       over.tabEl[after ? "after" : "before"](this.dragTab.tabEl);
     });
-    tabsEl.addEventListener("drop", (e) => e.preventDefault());
+    tabsEl.addEventListener("drop", (e) => {
+      if (this.dragTab) e.preventDefault();
+    });
     this.render();
   }
 
-  open(session: Session, saved: boolean, connect = true): Tab {
+  open(session: Session, saved: boolean, opts: { connect?: boolean; activate?: boolean } = {}): Tab {
     const tab = new Tab(structuredClone(session), saved, this);
     this.tabs.push(tab);
     this.tabsEl.append(tab.tabEl);
@@ -617,11 +845,12 @@ export class TabManager implements TabHost {
       tab.tabEl.classList.remove("dragging");
       this.dragTab = null;
       this.tabs = [...this.tabsEl.querySelectorAll(".tab")].map((el) => this.tabs.find((t) => t.tabEl === el)!).filter(Boolean);
+      this.hooks.changed();
     });
-    this.activate(tab);
+    if (opts.activate !== false || !this.active) this.activate(tab);
     tab.mount();
     tab.applySettings();
-    if (connect) {
+    if (opts.connect !== false) {
       // Wait a frame so the terminal has measured itself before we report a size.
       requestAnimationFrame(() => requestAnimationFrame(() => tab.connect()));
     }
@@ -631,23 +860,26 @@ export class TabManager implements TabHost {
 
   activate(tab: Tab) {
     if (this.active === tab) {
-      tab.focus();
+      if (!document.querySelector("dialog[open]")) tab.focus();
       return;
     }
     this.active?.setActive(false);
     this.active = tab;
     tab.setActive(true);
     tab.tabEl.scrollIntoView({ block: "nearest", inline: "nearest" });
-    setTimeout(() => tab.focus());
+    setTimeout(() => {
+      if (!document.querySelector("dialog[open]")) tab.focus();
+    });
     this.render();
   }
 
   async close(tab: Tab, ask = true) {
     if (ask && tab.state === "connected") {
-      const ok = await confirmDialog({ title: `Disconnect ${tab.title}?`, message: "The session will be closed.", confirm: "Disconnect and close" });
+      const ok = await confirmDialog({ title: `Disconnect ${tab.title}?`, message: "The connection will be closed.", confirm: "Disconnect and close" });
       if (!ok) return;
     }
     const i = this.tabs.indexOf(tab);
+    if (i < 0) return;
     this.tabs.splice(i, 1);
     tab.dispose();
     if (this.active === tab) {
@@ -658,8 +890,18 @@ export class TabManager implements TabHost {
     this.render();
   }
 
-  async closeOthers(keep: Tab) {
-    for (const t of [...this.tabs]) if (t !== keep) await this.close(t, false);
+  /** Close several tabs, asking once if any are connected. */
+  async closeMany(list: Tab[]) {
+    const live = list.filter((t) => t.state === "connected").length;
+    if (live) {
+      const ok = await confirmDialog({
+        title: `Close ${list.length} tab${list.length === 1 ? "" : "s"}?`,
+        message: `${live} ${live === 1 ? "is" : "are"} still connected and will be disconnected.`,
+        confirm: `Close ${list.length} tab${list.length === 1 ? "" : "s"}`,
+      });
+      if (!ok) return;
+    }
+    for (const t of list) await this.close(t, false);
   }
 
   cycle(delta: number) {
@@ -680,7 +922,7 @@ export class TabManager implements TabHost {
     }
   }
 
-  /** Targets for button bar / command bar sends. */
+  /** Tabs that typing, buttons and the command window go to right now. */
   targets(): Tab[] {
     if (!this.active) return [];
     if (this.broadcast && this.active.inBroadcast) return this.tabs.filter((t) => t.inBroadcast && t.state === "connected");
@@ -690,7 +932,7 @@ export class TabManager implements TabHost {
   async sendString(str: string) {
     const targets = this.targets();
     if (!targets.length) {
-      toast(this.active ? "This tab isn't connected." : "Open a session first.");
+      toast(this.active ? "This tab isn't connected. Press Enter in it to reconnect." : "Open a session first.");
       return;
     }
     await Promise.all(targets.map((t) => playSendString(str, (s) => t.send(s))));
@@ -700,7 +942,8 @@ export class TabManager implements TabHost {
   setBroadcast(on: boolean) {
     this.broadcast = on;
     this.stripEl.classList.toggle("broadcasting", on);
-    if (on) toast("Broadcast on — typing goes to every checked tab.");
+    this.panesEl.classList.toggle("broadcasting", on);
+    if (on) toast("Broadcast on: typing goes to every checked tab.");
     this.render();
   }
 
@@ -712,7 +955,7 @@ export class TabManager implements TabHost {
   }
 
   changed(_tab: Tab) {
-    this.onChange();
+    this.hooks.changed();
   }
 
   isVisible(tab: Tab) {
@@ -720,30 +963,26 @@ export class TabManager implements TabHost {
   }
 
   editSession(tab: Tab) {
-    this.onEditSession(tab);
+    this.hooks.editSession(tab);
   }
 
   tabMenu(tab: Tab, x: number, y: number) {
-    showMenu(x, y, [
-      tab.state === "connected"
-        ? { label: "Disconnect", action: () => tab.disconnect(), icon: "plug" }
-        : { label: "Reconnect", action: () => tab.connect(), icon: "plug", shortcut: "Ctrl+Shift+R" },
-      { label: "Duplicate tab", action: () => this.open(tab.session, tab.saved) },
-      { label: "Rename tab…", action: async () => { const t = await promptText({ title: "Rename tab", label: "Tab name", value: tab.title }); if (t) tab.setTitle(t); } },
-      { label: tab.saved ? "Edit session…" : "Save as session…", action: () => this.editSession(tab), icon: "edit" },
-      { label: tab.logPath ? "Stop logging" : "Start logging", action: () => tab.toggleLogging(), icon: "log", separatorBefore: true },
-      { label: "Find…", action: () => tab.openFind(), icon: "search", shortcut: "Ctrl+Shift+F" },
-      { label: "Clear scrollback", action: () => { tab.term.clear(); tab.highlighter.clear(); } },
-      { label: "Send break", action: () => tab.sendBreak(), shortcut: "Ctrl+Shift+K" },
-      { label: "Close tab", action: () => this.close(tab), separatorBefore: true, shortcut: "Ctrl+Shift+W" },
-      { label: "Close other tabs", action: () => this.closeOthers(tab), danger: true },
-    ]);
+    this.hooks.tabMenu(tab, x, y);
+  }
+
+  targetLabel(tab: Tab) {
+    if (this.broadcast && tab.inBroadcast) {
+      const n = this.tabs.filter((t) => t.inBroadcast && t.state === "connected").length;
+      return { label: `${n} tab${n === 1 ? "" : "s"}`, many: n > 1 };
+    }
+    return { label: tab.title, many: false };
   }
 
   render() {
     const n = this.tabs.length;
     this.emptyEl.hidden = n > 0;
+    this.stripEl.classList.toggle("empty", n === 0);
     this.panesEl.style.setProperty("--cols", String(Math.max(1, Math.ceil(Math.sqrt(n)))));
-    this.onChange();
+    this.hooks.changed();
   }
 }

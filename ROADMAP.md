@@ -28,8 +28,12 @@ How Tether 0.1 compares with what SecureCRT offers, and what's planned next. "Do
 | Session logging | Yes | Done, raw or plain, timestamps, templates |
 | Find in scrollback | Yes | Done |
 | Color schemes / fonts | Yes | Done |
-| Login actions (expect/send) | Yes | Partial: send-after-login lines, no expect yet |
+| Login actions (expect/send) | Yes | Done, with templates and keychain-backed tokens |
 | Command palette | No | Done |
+| Menu bar and toolbar | Yes | Done |
+| Auto-reconnect | Yes | Done, with back-off |
+| Anti-idle | Yes | Done (send a string after N idle seconds) |
+| Clone session | Yes | Done |
 | Multi-line paste confirmation | No | Done |
 | Import from SecureCRT | n/a | Done (hosts, ports, users, serial, folders) |
 | Portable mode | Yes | Done |
@@ -42,25 +46,23 @@ How Tether 0.1 compares with what SecureCRT offers, and what's planned next. "Do
 | SSH agent / agent forwarding | Yes | Planned |
 | GSSAPI / Kerberos, smart cards | Yes | Later |
 | Keyword-triggered actions | Yes | Planned |
-| Restore open tabs on launch | Yes | Planned |
+| Restore open tabs on launch | Yes | Done (tabs, titles, tiling, broadcast checkboxes) |
 | Settings sync across machines | No | Possible via Git today |
 
 ## Next up
 
-1. **Expect/send login scripts.** Wait for a prompt pattern before sending each line, with timeouts. Covers enable passwords and jump-through-console-server flows.
-2. **SFTP pane** beside an SSH tab, plus drag-and-drop upload. russh-sftp makes this mostly UI work.
-3. **Port forwarding** per session (local, remote, SOCKS).
-4. **SSH agent** support: Pageant / Windows OpenSSH agent / ssh-agent, and forwarding.
-5. **TFTP server** in the status bar for pushing IOS images and pulling configs.
-6. **Xmodem/Ymodem** over serial for ROMMON image recovery.
-7. **Restore workspace**: reopen the tabs (and tile/broadcast state) you had last time.
-8. **Split panes** that can be dragged and resized.
+1. **SFTP pane** beside an SSH tab, plus drag-and-drop upload. russh-sftp makes this mostly UI work.
+2. **Port forwarding** per session (local, remote, SOCKS).
+3. **SSH agent** support: Pageant / Windows OpenSSH agent / ssh-agent, and forwarding.
+4. **TFTP server** in the status bar for pushing IOS images and pulling configs.
+5. **Xmodem/Ymodem** over serial for ROMMON image recovery.
+6. **Split panes** that can be dragged and resized.
 
 ## Scripting
 
 The plan is a small, sandboxed scripting API over the same connection layer, so a script can open sessions, send, wait for output and read the screen. A JavaScript runtime is the likely choice since the UI already speaks it; a Python bridge for people coming from SecureCRT scripts is worth considering afterwards.
 
-## Known limitations in 0.1
+## Known limitations
 
 - RFC 4335 break over SSH isn't exposed by the SSH library yet, so break works on serial and Telnet only.
 - Keyword highlighting skips full-screen apps (vim, top) and may leave a stale color if a program rewrites lines in place.

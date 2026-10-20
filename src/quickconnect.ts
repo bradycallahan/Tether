@@ -80,3 +80,46 @@ function hostProtocol(kind: "ssh" | "telnet" | "raw", rest: string): Protocol | 
   if (p.kind === "ssh") p.username = user;
   return p;
 }
+
+interface Rankable {
+  name: string;
+  folder: string;
+  protocol: Protocol;
+  notes?: string;
+}
+
+/**
+ * Saved sessions matching what's typed, best first: name prefix, then a
+ * word in the name, then host, folder or notes, then a loose in-order
+ * letter match on the name ("c1" finds "core-sw1").
+ */
+export function rankSessions<T extends Rankable>(query: string, sessions: T[], limit = 8): T[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const scored: { s: T; score: number }[] = [];
+  for (const s of sessions) {
+    const name = s.name.toLowerCase();
+    const host = "host" in s.protocol ? s.protocol.host.toLowerCase() : s.protocol.kind === "serial" ? s.protocol.port.toLowerCase() : "";
+    let score = 0;
+    if (name === q) score = 100;
+    else if (name.startsWith(q)) score = 80;
+    else if (name.split(/[\s\-_./]+/).some((w) => w.startsWith(q))) score = 60;
+    else if (host.startsWith(q)) score = 55;
+    else if (name.includes(q)) score = 50;
+    else if (host.includes(q)) score = 40;
+    else if (s.folder.toLowerCase().includes(q)) score = 25;
+    else if (s.notes?.toLowerCase().includes(q)) score = 15;
+    else if (q.length > 1 && subsequence(name, q)) score = 10;
+    if (score) scored.push({ s, score });
+  }
+  return scored
+    .sort((a, b) => b.score - a.score || a.s.name.localeCompare(b.s.name))
+    .slice(0, limit)
+    .map((x) => x.s);
+}
+
+function subsequence(hay: string, q: string): boolean {
+  let i = 0;
+  for (const c of hay) if (c === q[i]) i++;
+  return i === q.length;
+}

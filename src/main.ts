@@ -2,48 +2,67 @@ import "./styles.css";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "./api";
+import { commands, isMac, type Command } from "./commands";
 import { clear, h, icon } from "./dom";
-import { alertDialog, confirmDialog, modal, promptText, showMenu, toast } from "./dialogs";
-import { editButtonBars, editHighlights, editSession, editSettings } from "./editors";
-import { Sidebar } from "./sidebar";
-import { store } from "./state";
-import { TabManager, type Tab } from "./tabs";
-import { hostLabel, newSession, PROTOCOL_NAMES, type Session } from "./types";
+import { alertDialog, confirmDialog, modal, promptText, toast } from "./dialogs";
+import { editButton, editButtonBars, editHighlights, editSession, editSettings, quickConnectDialog, type SessionEditResult, type SettingsPage } from "./editors";
+import { aboutDialog, referenceDialog, shortcutsDialog } from "./help";
+import { cmd, menuOpen, showMenu, type MenuEntry, type MenuItem } from "./menu";
+import { MenuBar, Toolbar, type MenuDef } from "./menubar";
+import { Omnibox } from "./omnibox";
+import { draggedSessionIds, isSessionDrag, quickSession, Sidebar } from "./sidebar";
+import { folderName, isUnder, joinFolder, store } from "./state";
+import { TabManager, type Tab, type TabState } from "./tabs";
+import { hostLabel, newSession, PROTOCOL_NAMES, type Protocol, type Session, type Settings } from "./types";
+import { Welcome } from "./welcome";
 
-const isMac = navigator.platform.toUpperCase().includes("MAC");
-const MOD = isMac ? "⌘" : "Ctrl";
+const MANY_TABS = 8;
 
 class App {
   root = document.getElementById("app")!;
   sidebar!: Sidebar;
   tabs!: TabManager;
+  menubar!: MenuBar;
+  toolbar!: Toolbar;
+  omnibox!: Omnibox;
+  welcome!: Welcome;
   barSelect!: HTMLSelectElement;
   barButtons!: HTMLElement;
   buttonBarEl!: HTMLElement;
   cmdBar!: HTMLElement;
   cmdInput!: HTMLInputElement;
-  cmdTarget!: HTMLElement;
+  cmdTarget!: HTMLButtonElement;
   statusEl!: HTMLElement;
-  bcBtn!: HTMLButtonElement;
-  tileBtn!: HTMLButtonElement;
+  uptimeEl: HTMLElement | null = null;
   currentBar: string | null = null;
   history: string[] = [];
   historyPos = -1;
+  private uptimeTimer: number | undefined;
+  private lastActive: Tab | null = null;
+  /** True until the last workspace has been read back, so startup doesn't overwrite it. */
+  private restoring = true;
+  private savedWorkspace = "";
 
   async start() {
     await store.load();
     this.applyTheme();
+    this.registerCommands();
     this.build();
     store.on("settings", () => {
       this.applyTheme();
+      this.applyChrome();
       for (const t of this.tabs.tabs) t.applySettings();
       this.renderBars();
+      this.refresh();
     });
     store.on("highlights", () => this.tabs.tabs.forEach((t) => t.applyHighlightSet()));
     store.on("bars", () => this.renderBars());
+    store.on("sessions", () => this.refresh());
     matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => this.applyTheme());
     addEventListener("keydown", (e) => this.shortcut(e), true);
     addEventListener("focus", () => this.tabs.active?.tabEl.classList.remove("unread"));
+    this.restoreWorkspace();
+    this.guardClose();
   }
 
   applyTheme() {
@@ -53,59 +72,265 @@ class App {
     this.root.style.setProperty("--sidebar-w", `${store.settings.sidebarWidth}px`);
   }
 
+  /** Show or hide the optional parts of the window. */
+  applyChrome() {
+    const s = store.settings;
+    this.root.classList.toggle("sidebar-hidden", !s.showSidebar);
+    this.toolbar.el.hidden = !s.showToolbar;
+    this.statusEl.hidden = !s.showStatusBar;
+    this.buttonBarEl.hidden = !s.showButtonBar;
+    this.cmdBar.hidden = !s.showCommandBar;
+    this.tabs?.tabs.forEach((t) => t.fitSoon());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Commands
+
+  registerCommands() {
+    const active = () => this.tabs?.active ?? null;
+    const has = () => !!active();
+    const connected = () => active()?.state === "connected";
+    const toggle = (key: keyof Settings) => () => store.patchSettings({ [key]: !store.settings[key] } as Partial<Settings>);
+    const shown = (key: keyof Settings) => () => !!store.settings[key];
+    const list: Command[] = [
+      // File
+      { id: "session.new", label: "New session…", icon: "plus", keys: ["Mod+Shift+N"], run: () => this.create(this.newSessionFolder()) },
+      { id: "folder.new", label: "New folder…", icon: "folderPlus", run: () => this.createFolder("") },
+      { id: "connect.focus", label: "Connect to address", icon: "bolt", detail: "Type an address or session name", keys: ["Mod+Shift+T"], macKeys: ["Meta+T"], run: () => this.focusOmnibox() },
+      { id: "connect.quick", label: "Quick connect…", icon: "bolt", run: () => this.quickConnect() },
+      { id: "connect.serial", label: "Serial console…", icon: "serial", run: () => this.quickConnect("serial") },
+      { id: "connect.local", label: "Local shell", icon: "terminal", keys: ["Mod+Shift+E"], run: () => this.openLocal() },
+      { id: "tab.reconnect", label: "Reconnect", icon: "refresh", detail: "Reconnect this tab", keys: ["Mod+Shift+R"], enabled: () => has() && !connected(), run: () => active()?.reconnectNow() },
+      { id: "tab.disconnect", label: "Disconnect", icon: "unplug", detail: "Disconnect this tab", keys: ["Mod+Shift+R"], enabled: () => connected() || active()?.state === "connecting", run: () => active()?.disconnect() },
+      { id: "tab.reconnectAll", label: "Reconnect all closed tabs", enabled: () => this.tabs.tabs.some((t) => t.state === "closed" || t.state === "idle"), run: () => this.tabs.tabs.filter((t) => t.state === "closed" || t.state === "idle").forEach((t) => t.reconnectNow()) },
+      { id: "tab.disconnectAll", label: "Disconnect all", enabled: () => this.tabs.tabs.some((t) => t.state === "connected"), run: () => this.disconnectAll() },
+      { id: "log.toggle", label: "Log session", icon: "log", detail: "Log this tab to a file", keys: ["Mod+Shift+L"], enabled: connected, checked: () => !!active()?.logPath, run: () => active()?.toggleLogging() },
+      { id: "log.openFolder", label: "Open log folder", run: () => api.openFolder("logs") },
+      { id: "import.securecrt", label: "Import from SecureCRT…", icon: "import", run: () => this.importSecureCrt() },
+      { id: "tab.close", label: "Close tab", keys: ["Mod+Shift+W"], macKeys: ["Meta+W"], enabled: has, run: () => active() && this.tabs.close(active()!) },
+      { id: "app.quit", label: isMac ? "Quit Tether" : "Exit", run: () => getCurrentWindow().close() },
+      // Edit
+      { id: "edit.copy", label: "Copy", icon: "copy", keys: ["Mod+Shift+C"], macKeys: ["Meta+C"], enabled: () => !!active()?.term.hasSelection(), run: () => active()?.copySelection() },
+      { id: "edit.paste", label: "Paste", icon: "paste", keys: ["Mod+Shift+V"], macKeys: ["Meta+V"], enabled: has, run: () => active()?.pasteFromClipboard() },
+      { id: "edit.selectAll", label: "Select all", keys: ["Mod+Shift+A"], macKeys: ["Meta+A"], enabled: has, run: () => active()?.term.selectAll() },
+      { id: "edit.find", label: "Find…", icon: "search", detail: "Find in scrollback", keys: ["Mod+Shift+F"], macKeys: ["Meta+F"], enabled: has, run: () => active()?.openFind() },
+      { id: "edit.clear", label: "Clear scrollback", icon: "eraser", macKeys: ["Meta+K"], enabled: has, run: () => active()?.clearScrollback() },
+      { id: "edit.reset", label: "Reset terminal", detail: "Fix a terminal garbled by binary output", enabled: has, run: () => active()?.term.reset() },
+      // View
+      { id: "view.sidebar", label: "Session manager", icon: "sidebar", keys: ["Mod+Shift+M"], checked: shown("showSidebar"), run: toggle("showSidebar") },
+      { id: "view.findSession", label: "Find a saved session", icon: "search", keys: ["Mod+Shift+S"], run: () => this.findSession() },
+      { id: "view.toolbar", label: "Toolbar", checked: shown("showToolbar"), run: toggle("showToolbar") },
+      { id: "view.buttonBar", label: "Button bar", checked: shown("showButtonBar"), run: toggle("showButtonBar") },
+      { id: "view.cmdBar", label: "Command window", icon: "command", detail: "Compose a command before sending it", keys: ["Mod+Shift+O"], checked: shown("showCommandBar"), run: () => this.toggleCmdBar() },
+      { id: "view.statusBar", label: "Status bar", checked: shown("showStatusBar"), run: toggle("showStatusBar") },
+      { id: "view.tile", label: "Tile tabs", icon: "tile", detail: "Show every tab at once", keys: ["Mod+Shift+G"], enabled: () => this.tabs.tabs.length > 1 || this.tabs.tiled, checked: () => this.tabs.tiled, run: () => this.toggleTile() },
+      { id: "view.fullscreen", label: "Full screen", icon: "fullscreen", keys: ["F11"], macKeys: ["Ctrl+Meta+F"], run: () => this.toggleFullscreen() },
+      { id: "view.zoomIn", label: "Bigger text", keys: ["Mod+=", "Mod++"], run: () => this.zoom(1) },
+      { id: "view.zoomOut", label: "Smaller text", keys: ["Mod+-"], run: () => this.zoom(-1) },
+      { id: "view.zoomReset", label: "Actual size", keys: ["Mod+0"], run: () => this.zoom(0) },
+      { id: "view.theme.system", label: "Match system", checked: () => store.settings.uiTheme === "system", run: () => store.patchSettings({ uiTheme: "system" }) },
+      { id: "view.theme.dark", label: "Dark", checked: () => store.settings.uiTheme === "dark", run: () => store.patchSettings({ uiTheme: "dark" }) },
+      { id: "view.theme.light", label: "Light", checked: () => store.settings.uiTheme === "light", run: () => store.patchSettings({ uiTheme: "light" }) },
+      // Session
+      { id: "session.options", label: "Session options…", icon: "sliders", detail: "Edit this session's settings", keys: ["Alt+Enter"], enabled: () => has() || this.sidebar?.selectedSessions().length === 1, run: () => this.sessionOptions() },
+      { id: "session.loginActions", label: "Login actions…", icon: "play", enabled: has, run: () => active() && this.editFromTab(active()!, "login") },
+      { id: "tab.rename", label: "Rename tab…", enabled: has, run: () => active() && this.renameTab(active()!) },
+      { id: "tab.clone", label: "Clone tab", icon: "clone", detail: "Open another tab to the same device", keys: ["Mod+Shift+D"], enabled: has, run: () => active() && this.cloneTab(active()!) },
+      { id: "tab.save", label: "Save as session…", enabled: () => !!active() && !active()!.saved, run: () => active() && this.editFromTab(active()!) },
+      { id: "tab.reveal", label: "Show in session manager", enabled: () => !!active()?.saved, run: () => this.revealActive() },
+      { id: "tab.break", label: "Send break", keys: ["Mod+Shift+K"], enabled: () => connected() && ["serial", "telnet"].includes(active()!.session.protocol.kind), run: () => active()?.sendBreak() },
+      { id: "broadcast.toggle", label: "Broadcast to checked tabs", icon: "broadcast", detail: "Type into every checked tab at once", keys: ["Mod+Shift+B"], checked: () => this.tabs.broadcast, run: () => this.toggleBroadcast() },
+      { id: "broadcast.member", label: "Include this tab in broadcast", enabled: has, checked: () => !!active()?.inBroadcast, run: () => active()?.setBroadcastMember(!active()!.inBroadcast) },
+      { id: "broadcast.checkAll", label: "Check all tabs", enabled: () => this.tabs.tabs.length > 0, run: () => this.tabs.tabs.forEach((t) => t.setBroadcastMember(true)) },
+      { id: "broadcast.uncheckAll", label: "Uncheck all tabs", enabled: () => this.tabs.tabs.length > 0, run: () => this.tabs.tabs.forEach((t) => t.setBroadcastMember(false)) },
+      // Tools
+      { id: "tools.palette", label: "Command palette…", icon: "command", keys: ["Mod+Shift+P"], run: () => this.palette() },
+      { id: "tools.buttonBars", label: "Button bars…", icon: "buttons", run: () => this.editBars() },
+      { id: "tools.highlights", label: "Keyword highlighting…", icon: "highlight", run: () => this.editHl() },
+      { id: "tools.dataFolder", label: "Open data folder", run: () => api.openFolder("data") },
+      { id: "tools.settings", label: "Settings…", icon: "gear", keys: ["Mod+,"], run: () => this.openSettings() },
+      // Window
+      { id: "tab.next", label: "Next tab", keys: ["Ctrl+Tab", "Ctrl+PageDown"], macKeys: ["Ctrl+Tab", "Meta+Shift+]"], enabled: () => this.tabs.tabs.length > 1, run: () => this.tabs.cycle(1) },
+      { id: "tab.prev", label: "Previous tab", keys: ["Ctrl+Shift+Tab", "Ctrl+PageUp"], macKeys: ["Ctrl+Shift+Tab", "Meta+Shift+["], enabled: () => this.tabs.tabs.length > 1, run: () => this.tabs.cycle(-1) },
+      { id: "tab.closeOthers", label: "Close other tabs", enabled: () => this.tabs.tabs.length > 1, run: () => this.tabs.closeMany(this.tabs.tabs.filter((t) => t !== active())) },
+      { id: "tab.closeAll", label: "Close all tabs", enabled: () => this.tabs.tabs.length > 0, run: () => this.tabs.closeMany([...this.tabs.tabs]) },
+      // Help
+      { id: "help.shortcuts", label: "Keyboard shortcuts", icon: "keyboard", keys: ["F1"], run: () => shortcutsDialog(this.shortcutGroups()) },
+      { id: "help.reference", label: "Quick reference", icon: "help", detail: "Address formats, send-string escapes and login tokens", run: () => referenceDialog() },
+      { id: "help.about", label: "About Tether", icon: "info", run: () => aboutDialog() },
+    ];
+    for (let n = 1; n <= 9; n++) {
+      list.push({
+        id: `tab.goto${n}`,
+        label: n === 9 ? "Go to last tab" : `Go to tab ${n}`,
+        keys: [`Alt+${n}`],
+        macKeys: [`Meta+${n}`],
+        hideInPalette: true,
+        run: () => {
+          const t = n === 9 ? this.tabs.tabs.at(-1) : this.tabs.tabs[n - 1];
+          if (t) this.tabs.activate(t);
+        },
+      });
+    }
+    commands.add(...list);
+  }
+
+  menus(): MenuDef[] {
+    return [
+      {
+        label: "File",
+        items: () => [
+          cmd("session.new"), cmd("folder.new"), "-",
+          cmd("connect.focus"), cmd("connect.quick"), cmd("connect.serial"), cmd("connect.local"),
+          { label: "Recent sessions", icon: "clock", submenu: this.recentMenu() }, "-",
+          cmd("tab.reconnect"), cmd("tab.disconnect"), cmd("tab.reconnectAll"), cmd("tab.disconnectAll"), "-",
+          cmd("log.toggle"), cmd("log.openFolder"), "-",
+          cmd("import.securecrt"), "-",
+          cmd("tab.close"), cmd("app.quit"),
+        ],
+      },
+      {
+        label: "Edit",
+        items: () => [cmd("edit.copy"), cmd("edit.paste"), cmd("edit.selectAll"), "-", cmd("edit.find"), "-", cmd("edit.clear"), cmd("edit.reset")],
+      },
+      {
+        label: "View",
+        items: () => [
+          cmd("view.sidebar"), cmd("view.toolbar"), cmd("view.buttonBar"), cmd("view.cmdBar"), cmd("view.statusBar"), "-",
+          cmd("view.tile"), cmd("view.fullscreen"), "-",
+          cmd("view.zoomIn"), cmd("view.zoomOut"), cmd("view.zoomReset"), "-",
+          { label: "Theme", submenu: [cmd("view.theme.system"), cmd("view.theme.dark"), cmd("view.theme.light")] },
+        ],
+      },
+      {
+        label: "Session",
+        items: () => [
+          cmd("session.options"), cmd("session.loginActions"), cmd("tab.rename"), cmd("tab.clone"), cmd("tab.save"), cmd("tab.reveal"), "-",
+          cmd("tab.break"), "-",
+          cmd("broadcast.toggle"), cmd("broadcast.member"), cmd("broadcast.checkAll"), cmd("broadcast.uncheckAll"),
+        ],
+      },
+      {
+        label: "Tools",
+        items: () => [cmd("tools.palette"), "-", cmd("tools.buttonBars"), cmd("tools.highlights"), "-", cmd("tools.dataFolder"), cmd("tools.settings")],
+      },
+      {
+        label: "Window",
+        items: () => [
+          cmd("tab.next"), cmd("tab.prev"), "-", cmd("tab.closeOthers"), cmd("tab.closeAll"),
+          ...(this.tabs.tabs.length ? (["-"] as MenuEntry[]) : []),
+          ...this.tabs.tabs.map((t, i): MenuItem => ({
+            label: t.title,
+            checked: t === this.tabs.active,
+            hint: stateWord(t.state),
+            shortcut: i < 8 ? commands.shortcut(`tab.goto${i + 1}`) : undefined,
+            action: () => this.tabs.activate(t),
+          })),
+        ],
+      },
+      { label: "Help", items: () => [cmd("help.shortcuts"), cmd("help.reference"), "-", cmd("help.about")] },
+    ];
+  }
+
+  shortcutGroups() {
+    const ids = commands.all().map((c) => c.id);
+    const group = (title: string, prefixes: string[]) => ({ title, ids: ids.filter((id) => prefixes.some((p) => id.startsWith(p))) });
+    return [
+      group("Connecting", ["session.new", "connect.", "tab.reconnect", "tab.disconnect"]),
+      group("Tabs", ["tab.close", "tab.clone", "tab.next", "tab.prev"]),
+      group("Terminal", ["edit.", "log.", "tab.break", "view.zoom", "view.fullscreen"]),
+      group("Working with many devices", ["broadcast.", "view.tile", "view.cmdBar"]),
+      group("Finding things", ["tools.palette", "view.findSession", "view.sidebar"]),
+      group("Settings and help", ["session.options", "tools.settings", "help."]),
+    ];
+  }
+
+  recentMenu(): MenuItem[] {
+    const recent = store.recentSessions().slice(0, 10);
+    if (!recent.length) return [{ label: "Nothing yet", disabled: true }];
+    return recent.map((s) => ({ label: s.name, hint: hostLabel(s.protocol), action: () => this.openSessions([s]) }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Layout
+
   build() {
     this.sidebar = new Sidebar({
-      connect: (s, saved) => this.tabs.open(s, saved),
-      connectMany: (list) => this.connectMany(list),
+      connect: (list, o) => this.openSessions(list, o),
       edit: (s) => this.edit(s),
       create: (folder) => this.create(folder),
+      createFolder: (parent) => this.createFolder(parent),
       duplicate: (s) => this.duplicate(s),
-      remove: (s) => this.remove(s),
-      renameFolder: (f) => this.renameFolder(f),
+      remove: (list) => this.removeSessions(list),
+      removeFolder: (path) => this.removeFolder(path),
       importSecureCrt: () => this.importSecureCrt(),
-      settings: () => this.openSettings(),
     });
 
-    const splitter = h("div", { class: "splitter", role: "separator", "aria-orientation": "vertical", title: "Drag to resize, double-click to hide" });
+    const splitter = h("div", { class: "splitter", role: "separator", "aria-orientation": "vertical", title: "Drag to resize. Double-click to hide." });
     this.setupSplitter(splitter);
 
+    this.menubar = new MenuBar(this.menus(), () => this.focusTerminal());
+    this.omnibox = new Omnibox({
+      connectSession: (s) => this.openSessions([s]),
+      connectTarget: (p, typed) => this.tabs.open(quickSession(p, typed), false),
+      saveTarget: (p) => this.create("", quickSession(p)),
+      done: () => this.focusTerminal(),
+    });
+    this.toolbar = new Toolbar([
+      "view.sidebar",
+      this.omnibox.el,
+      "-",
+      "session.new",
+      { id: "tab.reconnect", text: "Reconnect" },
+      { id: "tab.disconnect", text: "Disconnect" },
+      "tab.clone",
+      "-",
+      "edit.copy",
+      "edit.paste",
+      "edit.find",
+      "-",
+      { id: "log.toggle", text: "Log" },
+      { id: "broadcast.toggle", text: "Broadcast" },
+      { id: "view.tile", text: "Tile" },
+      "view.cmdBar",
+      "grow",
+      "session.options",
+      "tools.settings",
+    ]);
+
     // Tab strip
-    const tabsEl = h("div", { class: "tabs", role: "tablist" });
-    this.bcBtn = h("button", { type: "button", class: "btn ghost icon-only", title: `Broadcast typing to checked tabs (${MOD}+Shift+B)`, "aria-pressed": "false", onclick: () => this.toggleBroadcast() }, icon("broadcast"));
-    this.tileBtn = h("button", { type: "button", class: "btn ghost icon-only", title: `Tile all tabs (${MOD}+Shift+G)`, "aria-pressed": "false", onclick: () => this.toggleTile() }, icon("tile"));
-    const strip = h(
-      "div",
-      { class: "tabstrip" },
-      tabsEl,
-      h("div", { class: "strip-tools" },
-        h("button", { type: "button", class: "btn ghost icon-only", title: `Local shell (${MOD}+Shift+E)`, onclick: () => this.openLocal() }, icon("terminal")),
-        this.tileBtn,
-        this.bcBtn,
-        h("button", { type: "button", class: "btn ghost icon-only", title: `Command bar (${MOD}+Shift+O)`, onclick: () => this.toggleCmdBar() }, icon("command")),
-      ),
-    );
+    const tabsEl = h("div", { class: "tabs", role: "tablist", "aria-label": "Open tabs" });
+    const newTab = h("button", {
+      type: "button",
+      class: "newtab",
+      title: "New tab",
+      onclick: (e: MouseEvent) => {
+        const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+        this.newTabMenu(r.left, r.bottom + 2);
+      },
+    }, icon("plus"));
+    const strip = h("div", { class: "tabstrip" }, tabsEl, newTab, h("span", { class: "strip-fill", ondblclick: () => this.focusOmnibox() }));
 
-    const empty = h(
-      "div",
-      { class: "empty-state" },
-      h("div", {},
-        h("h2", {}, "Nothing connected"),
-        h("p", {}, "Double-click a saved session, or type an address, serial port or console-server line into the box at the top left."),
-        h("div", { class: "row" },
-          h("button", { type: "button", class: "btn primary", onclick: () => this.sidebar.quickInput.focus() }, "Quick connect"),
-          h("button", { type: "button", class: "btn", onclick: () => this.create("") }, "New session"),
-          h("button", { type: "button", class: "btn", onclick: () => this.openLocal() }, "Local shell"),
-        ),
-        h("p", { style: { marginTop: "22px", fontSize: "12px" } }, h("span", { class: "kbd" }, `${MOD}+Shift+P`), " opens every command and session"),
-      ),
-    );
-    const panes = h("div", { class: "panes" }, empty);
+    this.welcome = new Welcome({
+      connect: (s) => this.openSessions([s]),
+      connectSerial: (p) => this.tabs.open(quickSession(p, p.kind === "serial" ? p.port : hostLabel(p)), false),
+      run: (id) => commands.run(id),
+    });
+    const panes = h("div", { class: "panes" }, this.welcome.el);
+    this.setupSessionDrop(panes);
+    this.setupSessionDrop(strip);
 
-    // Command bar
-    this.cmdInput = h("input", { type: "text", placeholder: "Type a command and press Enter — escapes like \\r and ^C work", spellcheck: "false", "aria-label": "Command bar" });
-    this.cmdTarget = h("span", { class: "target" });
+    // Command window
+    this.cmdInput = h("input", { type: "text", placeholder: "Type a command and press Enter. Escapes like \\r and ^C work. Up and Down recall history.", spellcheck: "false", "aria-label": "Command window" });
+    this.cmdTarget = h("button", { type: "button", class: "target", title: "Click to switch between this tab and broadcasting to checked tabs", onclick: () => this.toggleBroadcast(false) });
     this.cmdInput.addEventListener("keydown", (e) => this.cmdKey(e));
-    this.cmdBar = h("div", { class: "cmdbar", hidden: !store.settings.showCommandBar }, icon("command"), this.cmdInput, this.cmdTarget);
+    this.cmdBar = h("div", { class: "cmdbar" },
+      h("span", { class: "label-text" }, "Send to"),
+      this.cmdTarget,
+      this.cmdInput,
+      h("button", { type: "button", class: "btn", onclick: () => this.sendCmd() }, "Send"),
+      h("button", { type: "button", class: "btn ghost icon-only", title: "Close the command window", onclick: () => this.toggleCmdBar(false) }, icon("close")),
+    );
 
     // Button bar
     this.barSelect = h("select", { "aria-label": "Button bar", title: "Choose a button bar" });
@@ -118,23 +343,34 @@ class App {
       this.currentBar = this.barSelect.value;
       this.renderBarButtons();
     });
-    this.barButtons = h("div", { style: { display: "contents" } });
-    this.buttonBarEl = h("div", { class: "buttonbar", hidden: !store.settings.showButtonBar }, this.barSelect, h("span", { class: "sep" }), this.barButtons);
+    this.barButtons = h("div", { class: "bar-buttons" });
+    this.buttonBarEl = h("div", { class: "buttonbar", role: "toolbar", "aria-label": "Button bar" }, this.barSelect, h("span", { class: "sep" }), this.barButtons);
+    this.buttonBarEl.addEventListener("contextmenu", (e) => {
+      if ((e.target as Element).closest(".sbtn")) return;
+      e.preventDefault();
+      this.barMenu(e.clientX, e.clientY, null);
+    });
     this.currentBar = store.settings.defaultButtonBar;
 
-    this.tabs = new TabManager(tabsEl, strip, panes, empty, () => this.refresh(), (tab) => this.editFromTab(tab));
+    this.statusEl = h("footer", { class: "status" });
+    this.tabs = new TabManager(tabsEl, strip, panes, this.welcome.el, {
+      changed: () => this.refresh(),
+      editSession: (tab) => this.editFromTab(tab),
+      tabMenu: (tab, x, y) => this.tabMenu(tab, x, y),
+    });
 
     const workspace = h("main", { class: "workspace" }, strip, panes, this.cmdBar, this.buttonBarEl);
-    this.statusEl = h("footer", { class: "status" });
     clear(this.root);
-    this.root.append(this.sidebar.el, splitter, workspace, this.statusEl);
+    this.root.append(this.menubar.el, this.toolbar.el, this.sidebar.el, splitter, workspace, this.statusEl);
+    this.applyChrome();
     this.renderBars();
+    this.welcome.render();
+    this.welcome.refreshPorts();
     this.refresh();
-    setTimeout(() => this.sidebar.quickInput.focus(), 50);
   }
 
   setupSplitter(el: HTMLElement) {
-    el.addEventListener("dblclick", () => this.root.classList.toggle("sidebar-hidden"));
+    el.addEventListener("dblclick", () => store.patchSettings({ showSidebar: false }));
     el.addEventListener("pointerdown", (e) => {
       el.setPointerCapture(e.pointerId);
       el.classList.add("drag");
@@ -147,7 +383,7 @@ class App {
         el.removeEventListener("pointermove", move);
         el.removeEventListener("pointerup", up);
         const w = Math.max(180, Math.min(520, ev.clientX));
-        if (w !== store.settings.sidebarWidth) store.saveSettings({ ...store.settings, sidebarWidth: w });
+        if (w !== store.settings.sidebarWidth) store.patchSettings({ sidebarWidth: w });
         this.tabs.tabs.forEach((t) => t.fitSoon());
       };
       el.addEventListener("pointermove", move);
@@ -155,7 +391,42 @@ class App {
     });
   }
 
-  // ---------- bars ----------
+  /** Dropping sessions from the tree onto the tab area opens them. */
+  setupSessionDrop(el: HTMLElement) {
+    el.addEventListener("dragover", (e) => {
+      if (!isSessionDrag(e)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+      el.classList.add("drop-open");
+    });
+    el.addEventListener("dragleave", (e) => {
+      if (!el.contains(e.relatedTarget as Node)) el.classList.remove("drop-open");
+    });
+    el.addEventListener("drop", (e) => {
+      el.classList.remove("drop-open");
+      const ids = draggedSessionIds(e);
+      if (!ids) return;
+      e.preventDefault();
+      this.openSessions(ids.map((id) => store.session(id)).filter((s): s is Session => !!s));
+    });
+  }
+
+  focusTerminal() {
+    this.tabs.active?.focus();
+  }
+
+  focusOmnibox() {
+    if (!store.settings.showToolbar) store.patchSettings({ showToolbar: true });
+    this.omnibox.focus();
+  }
+
+  findSession() {
+    if (!store.settings.showSidebar) store.patchSettings({ showSidebar: true });
+    this.sidebar.focusFilter();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Bars
 
   renderBars() {
     clear(this.barSelect);
@@ -163,37 +434,90 @@ class App {
     this.barSelect.append(h("option", { value: "__edit" }, "Edit bars…"));
     if (!store.bars.some((b) => b.name === this.currentBar)) this.currentBar = store.bars[0]?.name ?? null;
     this.barSelect.value = this.currentBar ?? "";
-    this.buttonBarEl.hidden = !store.settings.showButtonBar;
     this.renderBarButtons();
   }
 
   renderBarButtons() {
     clear(this.barButtons);
     const bar = store.bars.find((b) => b.name === this.currentBar);
-    if (!bar || bar.buttons.length === 0) {
-      this.barButtons.append(h("button", { type: "button", class: "btn ghost", onclick: () => this.editBars() }, icon("plus"), "Add buttons"));
-      return;
-    }
-    for (const b of bar.buttons) {
+    bar?.buttons.forEach((b, i) => {
       const btn = h("button", {
         type: "button",
         class: "sbtn",
-        title: b.send,
+        title: `Sends ${b.send}`,
         onclick: () => this.tabs.sendString(b.send),
+        onpointerdown: (e: Event) => e.preventDefault(),
         oncontextmenu: (e: MouseEvent) => {
           e.preventDefault();
-          showMenu(e.clientX, e.clientY, [{ label: "Edit button bars…", action: () => this.editBars(), icon: "edit" }]);
+          this.barMenu(e.clientX, e.clientY, i);
         },
       }, b.label || b.send);
       if (b.color) btn.style.setProperty("--btn-color", b.color);
       this.barButtons.append(btn);
+    });
+    this.barButtons.append(
+      h("button", {
+        type: "button",
+        class: `btn ghost add ${bar?.buttons.length ? "icon-only" : ""}`,
+        title: "Add a button",
+        onclick: () => this.editOneButton(null),
+      }, icon("plus"), bar?.buttons.length ? null : "Add a button"),
+    );
+  }
+
+  barMenu(x: number, y: number, index: number | null) {
+    const bar = store.bars.find((b) => b.name === this.currentBar);
+    const entries: MenuEntry[] = [];
+    if (index !== null && bar) {
+      const n = bar.buttons.length;
+      const move = (d: number) => {
+        const bars = structuredClone(store.bars);
+        const b = bars.find((x) => x.name === bar.name)!;
+        [b.buttons[index], b.buttons[index + d]] = [b.buttons[index + d], b.buttons[index]];
+        store.saveBars(bars);
+      };
+      entries.push(
+        { label: "Edit button…", icon: "edit", action: () => this.editOneButton(index) },
+        { label: "Move left", disabled: index === 0, action: () => move(-1) },
+        { label: "Move right", disabled: index === n - 1, action: () => move(1) },
+        {
+          label: "Delete button",
+          icon: "trash",
+          danger: true,
+          action: () => {
+            const bars = structuredClone(store.bars);
+            const removed = bars.find((x) => x.name === bar.name)!.buttons.splice(index, 1)[0];
+            const before = structuredClone(store.bars);
+            store.saveBars(bars);
+            toast(`Deleted “${removed.label}”`, { action: { label: "Undo", run: () => store.saveBars(before) } });
+          },
+        },
+        "-",
+      );
     }
+    entries.push(
+      { label: "New button…", icon: "plus", action: () => this.editOneButton(null) },
+      { label: "Edit button bars…", icon: "edit", action: () => this.editBars() },
+      "-",
+      cmd("view.buttonBar", { label: "Show button bar" }),
+    );
+    showMenu(x, y, entries);
+  }
+
+  async editOneButton(index: number | null) {
+    const bars = await editButton(this.currentBar ?? store.bars[0]?.name ?? "My buttons", index);
+    if (bars) {
+      await store.saveBars(bars);
+      if (!this.currentBar) this.currentBar = bars[0]?.name ?? null;
+      this.renderBars();
+    }
+    this.focusTerminal();
   }
 
   async editBars() {
     const bars = await editButtonBars(this.currentBar ?? undefined);
     if (bars) await store.saveBars(bars);
-    this.tabs.active?.focus();
+    this.focusTerminal();
   }
 
   async editHl() {
@@ -201,142 +525,327 @@ class App {
     if (sets) await store.saveHighlights(sets);
   }
 
-  // ---------- command bar ----------
+  // ---------------------------------------------------------------------------
+  // Command window
 
   toggleCmdBar(force?: boolean) {
-    const show = force ?? this.cmdBar.hidden;
-    this.cmdBar.hidden = !show;
-    store.saveSettings({ ...store.settings, showCommandBar: show });
-    if (show) this.cmdInput.focus();
-    else this.tabs.active?.focus();
-    this.tabs.tabs.forEach((t) => t.fitSoon());
+    const show = force ?? !store.settings.showCommandBar;
+    store.patchSettings({ showCommandBar: show });
+    if (show) setTimeout(() => this.cmdInput.focus());
+    else this.focusTerminal();
+  }
+
+  sendCmd() {
+    const v = this.cmdInput.value;
+    if (v.trim() && this.history[0] !== v) this.history.unshift(v);
+    this.history.length = Math.min(this.history.length, 200);
+    this.historyPos = -1;
+    const hasEnter = /\\[rn]$/.test(v);
+    this.tabs.sendString(hasEnter ? v : v + "\\r").then(() => this.cmdInput.focus());
+    this.cmdInput.value = "";
   }
 
   cmdKey(e: KeyboardEvent) {
     if (e.key === "Enter") {
-      const v = this.cmdInput.value;
-      if (v.trim() && this.history[0] !== v) this.history.unshift(v);
-      this.history.length = Math.min(this.history.length, 200);
-      this.historyPos = -1;
-      const hasEnter = /\\r|\\n$/.test(v);
-      this.tabs.sendString(hasEnter ? v : v + "\\r").then(() => this.cmdInput.focus());
-      this.cmdInput.value = "";
+      this.sendCmd();
     } else if (e.key === "ArrowUp") {
       if (this.historyPos < this.history.length - 1) this.cmdInput.value = this.history[++this.historyPos];
     } else if (e.key === "ArrowDown") {
       this.historyPos = Math.max(-1, this.historyPos - 1);
       this.cmdInput.value = this.historyPos >= 0 ? this.history[this.historyPos] : "";
     } else if (e.key === "Escape") {
-      this.tabs.active?.focus();
+      this.focusTerminal();
     } else return;
     e.preventDefault();
   }
 
-  // ---------- status ----------
+  // ---------------------------------------------------------------------------
+  // Status and refresh
 
   refresh() {
-    if (!this.statusEl) return;
+    if (!this.statusEl || !this.tabs) return;
     const t = this.tabs.active;
-    clear(this.statusEl);
-    const targets = this.tabs.targets();
-    if (this.tabs.broadcast) {
-      const n = this.tabs.tabs.filter((x) => x.inBroadcast && x.state === "connected").length;
-      this.cmdTarget.textContent = `To ${n} tab${n === 1 ? "" : "s"}`;
-      this.cmdTarget.className = "target all";
-    } else {
-      this.cmdTarget.textContent = t ? `To ${t.title}` : "";
-      this.cmdTarget.className = "target";
+    this.toolbar.refresh();
+
+    // Live LEDs in the session tree.
+    const live = new Map<string, TabState>();
+    const rank: Record<TabState, number> = { connected: 3, connecting: 2, closed: 1, idle: 0 };
+    for (const x of this.tabs.tabs) {
+      if (!x.saved) continue;
+      const cur = live.get(x.session.id);
+      if (!cur || rank[x.state] > rank[cur]) live.set(x.session.id, x.state);
     }
-    this.bcBtn.setAttribute("aria-pressed", String(this.tabs.broadcast));
-    this.tileBtn.setAttribute("aria-pressed", String(this.tabs.tiled));
+    this.sidebar.setLive(live);
+
+    // Command window target.
+    const targets = this.tabs.targets();
+    const all = this.tabs.broadcast && !!t?.inBroadcast;
+    this.cmdTarget.textContent = all ? `${targets.length} checked tab${targets.length === 1 ? "" : "s"}` : t ? t.title : "No tab";
+    this.cmdTarget.classList.toggle("all", all);
+
+    // Follow the active session's button bar.
+    if (t !== this.lastActive) {
+      this.lastActive = t;
+      const want = t?.session.buttonBar;
+      if (want && want !== this.currentBar && store.bars.some((b) => b.name === want)) {
+        this.currentBar = want;
+        this.renderBars();
+      }
+      if (!t) this.welcome.refreshPorts();
+    }
+
+    this.renderStatus(t, targets.length);
+    this.tickUptime();
+    this.persistWorkspace();
+  }
+
+  renderStatus(t: Tab | null, targets: number) {
+    clear(this.statusEl);
+    this.uptimeEl = null;
+    const live = this.tabs.tabs.filter((x) => x.state === "connected").length;
     if (!t) {
       this.statusEl.append(h("span", { class: "seg" }, `${store.sessions.length} saved session${store.sessions.length === 1 ? "" : "s"}`));
       getCurrentWindow().setTitle("Tether").catch(() => {});
       return;
     }
-    const stateClass = t.state === "connected" ? "on" : t.state === "connecting" ? "warn" : "";
-    this.statusEl.append(
+    const stateClass = t.state === "connected" ? "on" : t.state === "connecting" ? "warn" : t.state === "closed" ? "bad" : "";
+    this.uptimeEl = h("span", { class: "seg dim" });
+    const segs = [
       h("span", { class: `seg ${stateClass}` }, h("span", { class: `led ${t.state === "idle" ? "" : t.state}` }), t.statusMessage),
       h("span", { class: "seg" }, t.session.protocol.kind === "local" ? hostLabel(t.session.protocol) : `${PROTOCOL_NAMES[t.session.protocol.kind]} ${hostLabel(t.session.protocol)}`),
+      this.uptimeEl,
       h("span", { class: "grow" }),
-      ...(this.tabs.broadcast ? [h("span", { class: "seg warn" }, icon("broadcast"), `Broadcasting to ${targets.length}`)] : []),
-      h("button", { type: "button", class: `seg ${t.logPath ? "on" : ""}`, title: t.logPath ?? `Start logging (${MOD}+Shift+L)`, onclick: () => t.toggleLogging() }, icon("log"), t.logPath ? "Logging" : "Not logging"),
-      h("span", { class: "seg" }, `${t.term.cols}×${t.term.rows}`),
-    );
+      this.tabs.broadcast
+        ? h("button", { type: "button", class: "seg warn", title: "Stop broadcasting", onclick: () => this.toggleBroadcast() }, icon("broadcast"), `Broadcasting to ${targets} tab${targets === 1 ? "" : "s"}`)
+        : null,
+      this.tabs.tabs.length > 1 ? h("span", { class: "seg dim" }, `${live} of ${this.tabs.tabs.length} tabs connected`) : null,
+      h("button", { type: "button", class: `seg ${t.logPath ? "on" : ""}`, title: t.logPath ?? commands.tip("log.toggle"), disabled: t.state !== "connected", onclick: () => t.toggleLogging() }, icon("log"), t.logPath ? "Logging" : "Not logging"),
+      h("span", { class: "seg dim", title: "Columns × rows" }, `${t.term.cols}×${t.term.rows}`),
+    ];
+    this.statusEl.append(...segs.filter((x): x is HTMLElement => !!x));
     getCurrentWindow().setTitle(`${t.title} — Tether`).catch(() => {});
   }
 
-  // ---------- session actions ----------
+  /** The connected-for clock runs only while a connected tab is in front. */
+  tickUptime() {
+    const t = this.tabs.active;
+    const run = !!t?.connectedAt && !this.statusEl.hidden;
+    const paint = () => {
+      const at = this.tabs.active?.connectedAt;
+      if (this.uptimeEl) this.uptimeEl.textContent = at ? `Up ${formatDuration(Date.now() - at)}` : "";
+    };
+    paint();
+    if (run && this.uptimeTimer === undefined) this.uptimeTimer = window.setInterval(paint, 1000);
+    if (!run && this.uptimeTimer !== undefined) {
+      clearInterval(this.uptimeTimer);
+      this.uptimeTimer = undefined;
+    }
+  }
 
-  async create(folder: string) {
-    const r = await editSession(newSession({ folder }), { isNew: true });
-    if (!r) return;
+  // ---------------------------------------------------------------------------
+  // Workspace
+
+  persistWorkspace() {
+    if (this.restoring) return;
+    const w = store.workspace;
+    w.tabs = this.tabs.tabs.map((t) => ({ session: t.session, saved: t.saved, title: t.customTitle ? t.title : "", inBroadcast: t.inBroadcast }));
+    w.active = this.tabs.active ? this.tabs.tabs.indexOf(this.tabs.active) : 0;
+    w.tiled = this.tabs.tiled;
+    const json = JSON.stringify(w);
+    if (json === this.savedWorkspace) return;
+    this.savedWorkspace = json;
+    store.saveWorkspaceSoon();
+  }
+
+  restoreWorkspace() {
+    const w = store.workspace;
+    this.savedWorkspace = JSON.stringify(w);
+    if (!store.settings.restoreWorkspace || !w.tabs.length) {
+      this.restoring = false;
+      setTimeout(() => this.omnibox.input.focus(), 50);
+      return;
+    }
+    try {
+      for (const wt of w.tabs) {
+        const fresh = wt.saved ? store.session(wt.session.id) : undefined;
+        const tab = this.tabs.open(fresh ?? wt.session, !!fresh, { activate: false });
+        if (wt.title) tab.setTitle(wt.title);
+        tab.setBroadcastMember(wt.inBroadcast);
+      }
+      const active = this.tabs.tabs[Math.min(w.active, this.tabs.tabs.length - 1)];
+      if (active) this.tabs.activate(active);
+      if (w.tiled && this.tabs.tabs.length > 1) this.tabs.setTiled(true);
+    } finally {
+      this.restoring = false;
+    }
+    this.persistWorkspace();
+  }
+
+  /** Ask before closing the window on live connections, and save the workspace. */
+  guardClose() {
+    getCurrentWindow()
+      .onCloseRequested(async (e) => {
+        const live = this.tabs.tabs.filter((t) => t.state === "connected").length;
+        if (live) {
+          e.preventDefault();
+          const verb = isMac ? "Quit" : "Exit";
+          const they = live === 1 ? "It'll" : "They'll";
+          const ok = await confirmDialog({
+            title: `${verb} with ${live} connected tab${live === 1 ? "" : "s"}?`,
+            message: store.settings.restoreWorkspace ? `${they} be disconnected now and reopened next time Tether starts.` : `${they} be disconnected.`,
+            confirm: verb,
+          });
+          if (!ok) return;
+          await store.saveWorkspaceNow();
+          await getCurrentWindow().destroy();
+          return;
+        }
+        await store.saveWorkspaceNow();
+      })
+      .catch(() => {});
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sessions
+
+  async openSessions(list: Session[], opts: { tile?: boolean } = {}) {
+    if (!list.length) return;
+    if (list.length > MANY_TABS) {
+      const ok = await confirmDialog({ title: `Open ${list.length} tabs?`, message: "Each session opens in its own tab and connects right away.", confirm: `Open ${list.length} tabs` });
+      if (!ok) return;
+    }
+    list.forEach((s, i) => {
+      this.tabs.open(s, true, { activate: i === 0 });
+      store.touchRecent(s.id);
+    });
+    if (opts.tile && this.tabs.tabs.length > 1) this.tabs.setTiled(true);
+  }
+
+  newSessionFolder(): string {
+    return this.sidebar.selectedSessions()[0]?.folder ?? "";
+  }
+
+  async saveEdited(r: SessionEditResult) {
     await store.saveSession(r.session);
-    if (r.connect) this.tabs.open(r.session, true);
+    for (const [kind, value] of Object.entries(r.secrets)) {
+      await api.setSecret(r.session.id, kind as keyof SessionEditResult["secrets"], value).catch((e) => toast(e?.message ?? "Couldn't save to the system keychain."));
+    }
+    for (const t of this.tabs.tabs) if (t.saved && t.session.id === r.session.id) t.updateSession(r.session);
+  }
+
+  async create(folder: string, base?: Session) {
+    const r = await editSession(base ? { ...base, folder } : newSession({ folder }), { isNew: true });
+    if (!r) return this.focusTerminal();
+    await this.saveEdited(r);
+    this.sidebar.reveal(r.session.id);
+    if (r.connect) this.openSessions([r.session]);
   }
 
   async edit(s: Session) {
     const r = await editSession(s, { isNew: false });
     if (!r) return;
-    await store.saveSession(r.session);
-    if (r.connect) this.tabs.open(r.session, true);
+    await this.saveEdited(r);
+    if (r.connect) this.openSessions([r.session]);
   }
 
-  async editFromTab(tab: Tab) {
+  async editFromTab(tab: Tab, page?: "login") {
     const existing = tab.saved ? store.session(tab.session.id) : undefined;
-    const r = await editSession(existing ?? tab.session, { isNew: !existing });
-    if (!r) return;
-    await store.saveSession(r.session);
-    tab.session = structuredClone(r.session);
-    tab.saved = true;
-    tab.setTitle(r.session.name);
-    tab.applyHighlightSet();
-    if (r.connect && tab.state !== "connected") tab.connect();
+    const r = await editSession(existing ?? tab.session, { isNew: !existing, page });
+    if (!r) return this.focusTerminal();
+    await this.saveEdited(r);
+    tab.updateSession(r.session);
+    store.touchRecent(r.session.id);
+    if (r.connect && tab.state !== "connected") tab.reconnectNow();
+    this.focusTerminal();
+  }
+
+  sessionOptions() {
+    const picked = this.sidebar.hasFocus() ? this.sidebar.selectedSessions() : [];
+    if (picked.length === 1) return this.edit(picked[0]);
+    const t = this.tabs.active;
+    if (t) this.editFromTab(t);
   }
 
   async duplicate(s: Session) {
     const copy = { ...structuredClone(s), id: crypto.randomUUID(), name: `${s.name} copy` };
-    await store.saveSession(copy);
-    this.edit(copy);
+    const r = await editSession(copy, { isNew: true });
+    if (!r) return;
+    await this.saveEdited(r);
+    this.sidebar.reveal(r.session.id);
   }
 
-  async remove(s: Session) {
-    const ok = await confirmDialog({ title: `Delete ${s.name}?`, message: "The session file and any password saved for it are removed. Open tabs stay connected.", confirm: "Delete session", danger: true });
-    if (ok) await store.deleteSession(s.id);
+  async removeSessions(list: Session[]) {
+    if (!list.length) return;
+    const one = list.length === 1;
+    const ok = await confirmDialog({
+      title: one ? `Delete ${list[0].name}?` : `Delete ${list.length} sessions?`,
+      message: `${one ? "The session file" : "Their files"} and any passwords saved for ${one ? "it" : "them"} are removed. Open tabs stay connected.`,
+      confirm: one ? "Delete session" : `Delete ${list.length} sessions`,
+      danger: true,
+    });
+    if (ok) await store.deleteSessions(list.map((s) => s.id));
   }
 
-  async renameFolder(path: string) {
-    const name = await promptText({ title: "Rename folder", label: "Folder path", value: path, confirm: "Rename" });
-    if (name === undefined) return;
-    const next = name.split("/").map((x) => x.trim()).filter(Boolean).join("/");
-    if (next === path) return;
-    const changed = store.sessions
-      .filter((s) => s.folder === path || s.folder.startsWith(path + "/"))
-      .map((s) => ({ ...s, folder: next + s.folder.slice(path.length) }));
-    await store.saveSessions(changed);
+  async createFolder(parent: string) {
+    const name = await promptText({
+      title: "New folder",
+      intro: parent ? `Inside ${parent}.` : undefined,
+      label: "Folder name",
+      placeholder: "e.g. Branch offices",
+      confirm: "Create folder",
+    });
+    const clean = name?.trim().replace(/\//g, "-");
+    if (!clean) return;
+    const path = joinFolder(parent, clean);
+    if (store.folders().includes(path)) {
+      toast(`${path} already exists.`);
+    } else {
+      await store.addFolder(path);
+    }
+    this.sidebar.revealFolder(path);
   }
 
-  async connectMany(list: Session[]) {
-    if (list.length > 8) {
-      const ok = await confirmDialog({ title: `Open ${list.length} tabs?`, message: "Each session opens in its own tab.", confirm: `Open ${list.length} tabs` });
+  async removeFolder(path: string) {
+    const inside = store.sessions.filter((s) => isUnder(s.folder, path));
+    if (inside.length) {
+      const ok = await confirmDialog({
+        title: `Delete ${folderName(path)} and its ${inside.length} session${inside.length === 1 ? "" : "s"}?`,
+        message: "The folder, everything in it, and any passwords saved for those sessions are removed. Open tabs stay connected.",
+        confirm: "Delete folder",
+        danger: true,
+      });
       if (!ok) return;
     }
-    for (const s of list) this.tabs.open(s, true);
+    await store.deleteFolder(path);
   }
 
   async openLocal() {
-    const s = newSession({ name: "Local shell", protocol: { kind: "local", shell: "" } });
-    this.tabs.open(s, false);
+    this.tabs.open(newSession({ name: "Local shell", protocol: { kind: "local", shell: "" } }), false);
   }
 
-  async openSettings() {
-    const s = await editSettings({
-      importSecureCrt: () => this.importSecureCrt(),
-      editBars: () => this.editBars(),
-      editHighlights: () => this.editHl(),
-    });
+  async quickConnect(kind?: Protocol["kind"]) {
+    const r = await quickConnectDialog(kind);
+    if (!r) return this.focusTerminal();
+    if (r.save) {
+      await store.saveSession(r.session);
+      this.sidebar.reveal(r.session.id);
+      this.openSessions([r.session]);
+    } else {
+      this.tabs.open(r.session, false);
+    }
+  }
+
+  async openSettings(page?: SettingsPage) {
+    const s = await editSettings(
+      {
+        importSecureCrt: () => this.importSecureCrt(),
+        editBars: () => this.editBars(),
+        editHighlights: () => this.editHl(),
+      },
+      page,
+    );
     if (s) await store.saveSettings(s);
-    this.tabs.active?.focus();
+    this.focusTerminal();
   }
 
   async importSecureCrt() {
@@ -356,12 +865,16 @@ class App {
     try {
       const report = await api.importSecureCrt(dir);
       if (!report.sessions.length) {
-        await alertDialog("Nothing to import", report.skipped.length ? `Skipped ${report.skipped.length} file(s) with unsupported protocols.` : "No session files were found in that folder.");
+        await alertDialog("Nothing to import", report.skipped.length ? `Skipped ${report.skipped.length} file(s) with unsupported protocols.` : "No session files were found in that folder. Make sure it's the Sessions folder itself.");
         return;
       }
       const existing = new Set(store.sessions.map((s) => `${s.folder}/${s.name}`.toLowerCase()));
       const fresh = report.sessions.filter((s) => !existing.has(`${s.folder}/${s.name}`.toLowerCase()));
       const dupes = report.sessions.length - fresh.length;
+      if (!fresh.length) {
+        await alertDialog("Already imported", `All ${report.sessions.length} sessions in that folder are already in your library.`);
+        return;
+      }
       const ok = await modal<boolean>((done) => ({
         title: `Import ${fresh.length} session${fresh.length === 1 ? "" : "s"}?`,
         body: h("div", { class: "callout" },
@@ -369,90 +882,146 @@ class App {
           dupes ? h("div", {}, `${dupes} already exist with the same name and folder and will be left alone.`) : null,
           report.skipped.length ? h("div", {}, `${report.skipped.length} skipped (unsupported protocols such as TAPI or RLogin).`) : null,
         ),
-        foot: [h("button", { type: "button", class: "btn", onclick: () => done(false) }, "Cancel"), h("button", { type: "submit", class: "btn primary" }, "Import")],
+        foot: [h("button", { type: "button", class: "btn", onclick: () => done(false) }, "Cancel"), h("button", { type: "submit", class: "btn primary" }, `Import ${fresh.length}`)],
         onSubmit: () => done(true),
       }));
-      if (ok && fresh.length) {
+      if (ok) {
         await store.saveSessions(fresh);
-        toast(`Imported ${fresh.length} sessions`);
+        toast(`Imported ${fresh.length} session${fresh.length === 1 ? "" : "s"}`);
       }
     } catch (e) {
       await alertDialog("Import failed", (e as { message?: string }).message ?? String(e));
     }
   }
 
-  toggleBroadcast() {
+  // ---------------------------------------------------------------------------
+  // Tabs
+
+  newTabMenu(x: number, y: number) {
+    const recent = store.recentSessions().slice(0, 8);
+    showMenu(x, y, [
+      cmd("connect.focus"),
+      cmd("connect.quick"),
+      cmd("connect.serial"),
+      cmd("connect.local"),
+      ...(recent.length ? (["-"] as MenuEntry[]) : []),
+      ...recent.map((s): MenuItem => ({ label: s.name, hint: hostLabel(s.protocol), action: () => this.openSessions([s]) })),
+    ]);
+  }
+
+  tabMenu(tab: Tab, x: number, y: number) {
+    this.tabs.activate(tab);
+    const i = this.tabs.tabs.indexOf(tab);
+    const right = this.tabs.tabs.slice(i + 1);
+    showMenu(x, y, [
+      tab.state === "connected" || tab.state === "connecting" ? cmd("tab.disconnect") : cmd("tab.reconnect"),
+      cmd("tab.clone"),
+      cmd("tab.rename"),
+      tab.saved ? cmd("session.options") : cmd("tab.save"),
+      cmd("tab.reveal"),
+      "-",
+      cmd("broadcast.member"),
+      cmd("log.toggle", { label: tab.logPath ? "Stop logging" : "Start logging" }),
+      cmd("edit.find"),
+      cmd("edit.clear"),
+      cmd("tab.break"),
+      "-",
+      cmd("tab.close"),
+      cmd("tab.closeOthers"),
+      { label: "Close tabs to the right", disabled: !right.length, action: () => this.tabs.closeMany(right) },
+    ]);
+  }
+
+  async renameTab(tab: Tab) {
+    const t = await promptText({ title: "Rename tab", label: "Tab name", value: tab.title, confirm: "Rename" });
+    if (t?.trim()) tab.setTitle(t.trim());
+    tab.focus();
+  }
+
+  cloneTab(tab: Tab) {
+    const copy = this.tabs.open(tab.session, tab.saved);
+    copy.inheritCredentials(tab);
+  }
+
+  revealActive() {
+    const t = this.tabs.active;
+    if (!t?.saved) return;
+    if (!store.settings.showSidebar) store.patchSettings({ showSidebar: true });
+    this.sidebar.reveal(t.session.id);
+  }
+
+  async disconnectAll() {
+    const live = this.tabs.tabs.filter((t) => t.state === "connected" || t.state === "connecting");
+    const ok = await confirmDialog({ title: `Disconnect ${live.length} tab${live.length === 1 ? "" : "s"}?`, message: "The tabs stay open so you can reconnect them.", confirm: "Disconnect all" });
+    if (ok) live.forEach((t) => t.disconnect());
+  }
+
+  toggleBroadcast(refocus = true) {
     this.tabs.setBroadcast(!this.tabs.broadcast);
-    this.tabs.active?.focus();
+    if (refocus) this.focusTerminal();
   }
 
   toggleTile() {
     this.tabs.setTiled(!this.tabs.tiled);
-    this.tabs.active?.focus();
+    this.focusTerminal();
+  }
+
+  async toggleFullscreen() {
+    const w = getCurrentWindow();
+    await w.setFullscreen(!(await w.isFullscreen())).catch(() => {});
   }
 
   zoom(delta: number) {
     const size = delta === 0 ? 14 : Math.min(40, Math.max(8, store.settings.fontSize + delta));
-    store.saveSettings({ ...store.settings, fontSize: size });
+    store.patchSettings({ fontSize: size });
   }
 
-  // ---------- palette ----------
+  // ---------------------------------------------------------------------------
+  // Palette
 
   async palette() {
-    type Item = { label: string; sub?: string; kbd?: string; run: () => void };
-    const actions: Item[] = [
-      { label: "New session", kbd: `${MOD}+Shift+N`, run: () => this.create("") },
-      { label: "Quick connect", kbd: `${MOD}+Shift+T`, run: () => this.sidebar.quickInput.focus() },
-      { label: "Open local shell", kbd: `${MOD}+Shift+E`, run: () => this.openLocal() },
-      { label: this.tabs.broadcast ? "Stop broadcasting" : "Broadcast to all tabs", kbd: `${MOD}+Shift+B`, run: () => this.toggleBroadcast() },
-      { label: this.tabs.tiled ? "Show one tab" : "Tile all tabs", kbd: `${MOD}+Shift+G`, run: () => this.toggleTile() },
-      { label: "Toggle command bar", kbd: `${MOD}+Shift+O`, run: () => this.toggleCmdBar() },
-      { label: "Toggle button bar", run: () => store.saveSettings({ ...store.settings, showButtonBar: !store.settings.showButtonBar }) },
-      { label: "Edit button bars", run: () => this.editBars() },
-      { label: "Edit keyword highlighting", run: () => this.editHl() },
-      { label: "Settings", kbd: `${MOD}+,`, run: () => this.openSettings() },
-      { label: "Import SecureCRT sessions", run: () => this.importSecureCrt() },
-      { label: "Open log folder", run: () => api.openFolder("logs") },
-      { label: "Toggle sidebar", run: () => this.root.classList.toggle("sidebar-hidden") },
-    ];
-    const t = this.tabs.active;
-    if (t) {
-      actions.push(
-        { label: t.state === "connected" ? "Disconnect tab" : "Reconnect tab", kbd: `${MOD}+Shift+R`, run: () => (t.state === "connected" ? t.disconnect() : t.connect()) },
-        { label: "Find in scrollback", kbd: `${MOD}+Shift+F`, run: () => t.openFind() },
-        { label: t.logPath ? "Stop logging" : "Start logging", kbd: `${MOD}+Shift+L`, run: () => t.toggleLogging() },
-        { label: "Send break", kbd: `${MOD}+Shift+K`, run: () => t.sendBreak() },
-        { label: "Clear scrollback", run: () => t.term.clear() },
-      );
-    }
-    const sessions: Item[] = store.sessions.map((s) => ({ label: s.name, sub: `${s.folder ? s.folder + " — " : ""}${hostLabel(s.protocol)}`, run: () => this.tabs.open(s, true) }));
-    const tabItems: Item[] = this.tabs.tabs.map((x) => ({ label: `Go to tab: ${x.title}`, sub: x.statusMessage, run: () => this.tabs.activate(x) }));
-    const all = [...sessions, ...tabItems, ...actions];
+    type Item = { label: string; sub?: string; kbd?: string; kind: string; run: () => void };
+    const sessions: Item[] = store.sessions.map((s) => ({ kind: "Session", label: s.name, sub: `${s.folder ? s.folder + " · " : ""}${hostLabel(s.protocol)}`, run: () => this.openSessions([s]) }));
+    const tabItems: Item[] = this.tabs.tabs.map((x) => ({ kind: "Tab", label: x.title, sub: x.statusMessage, run: () => this.tabs.activate(x) }));
+    const actions: Item[] = commands
+      .all()
+      .filter((c) => !c.hideInPalette && (c.enabled?.() ?? true) && c.id !== "connect.focus")
+      .map((c) => ({ kind: "Command", label: commands.label(c.id).replace(/…$/, ""), sub: c.detail, kbd: commands.shortcut(c.id), run: () => commands.run(c.id) }));
+    const all = [...tabItems, ...sessions, ...actions];
 
-    const input = h("input", { type: "text", placeholder: "Connect to a session or run a command", spellcheck: "false" });
+    const input = h("input", { type: "text", placeholder: "Search sessions, tabs and commands", spellcheck: "false", "aria-label": "Search" });
     const list = h("ul", { role: "listbox" });
     let sel = 0;
     let shown: Item[] = [];
     let close: (v: Item | undefined) => void = () => {};
     const render = () => {
       const q = input.value.trim().toLowerCase();
-      shown = (q ? all.filter((i) => fuzzy(`${i.label} ${i.sub ?? ""}`.toLowerCase(), q)) : all).slice(0, 60);
+      shown = (q ? rankItems(all, q) : all).slice(0, 80);
       sel = Math.min(sel, Math.max(0, shown.length - 1));
       clear(list);
       shown.forEach((i, idx) =>
         list.append(
           h("li", { class: idx === sel ? "sel" : "", role: "option", onclick: () => close(i), onmousemove: () => { if (sel !== idx) { sel = idx; render(); } } },
-            h("span", {}, i.label), i.sub ? h("span", { class: "sub" }, i.sub) : null, i.kbd ? h("span", { class: "kbd" }, i.kbd) : null),
+            h("span", { class: "kind" }, i.kind),
+            h("span", { class: "label" }, i.label),
+            i.sub ? h("span", { class: "sub" }, i.sub) : null,
+            i.kbd ? h("span", { class: "kbd" }, i.kbd) : null),
         ),
       );
+      if (!shown.length) list.append(h("li", { class: "none" }, "Nothing matches. Press Enter to quick connect to it instead."));
       list.children[sel]?.scrollIntoView({ block: "nearest" });
     };
     input.addEventListener("input", () => { sel = 0; render(); });
     input.addEventListener("keydown", (e) => {
       if (e.key === "ArrowDown") sel = Math.min(shown.length - 1, sel + 1);
       else if (e.key === "ArrowUp") sel = Math.max(0, sel - 1);
-      else if (e.key === "Enter") { if (shown[sel]) close(shown[sel]); }
-      else return;
+      else if (e.key === "Enter") {
+        if (shown[sel]) close(shown[sel]);
+        else if (input.value.trim()) {
+          const typed = input.value.trim();
+          close({ kind: "", label: "", run: () => { this.omnibox.input.value = typed; this.focusOmnibox(); this.omnibox.input.dispatchEvent(new Event("input")); } });
+        }
+      } else return;
       e.preventDefault();
       render();
     });
@@ -467,74 +1036,69 @@ class App {
       input.focus();
     });
     if (picked) picked.run();
-    else this.tabs.active?.focus();
+    else this.focusTerminal();
   }
 
-  // ---------- keyboard ----------
+  // ---------------------------------------------------------------------------
+  // Keyboard
 
   shortcut(e: KeyboardEvent) {
-    if (document.querySelector("dialog[open]")) return;
-    const mod = isMac ? e.metaKey : e.ctrlKey;
-    const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-    const t = this.tabs.active;
-    let handled = true;
-    if (mod && e.shiftKey) {
-      switch (key) {
-        case "p": this.palette(); break;
-        case "t": this.sidebar.quickInput.focus(); break;
-        case "n": this.create(""); break;
-        case "e": this.openLocal(); break;
-        case "w": if (t) this.tabs.close(t); break;
-        case "r": if (t) t.state === "connected" ? t.disconnect() : t.connect(); break;
-        case "f": t?.openFind(); break;
-        case "l": t?.toggleLogging(); break;
-        case "k": t?.sendBreak(); break;
-        case "b": this.toggleBroadcast(); break;
-        case "g": this.toggleTile(); break;
-        case "o": this.toggleCmdBar(); break;
-        case "c": if (t?.term.hasSelection()) navigator.clipboard.writeText(t.term.getSelection()); break;
-        case "v": t?.pasteFromClipboard(); break;
-        case "s": this.sidebar.filterInput.focus(); break;
-        default: handled = false;
-      }
-    } else if (e.ctrlKey && (key === "Tab" || key === "PageDown" || key === "PageUp")) {
-      this.tabs.cycle(key === "PageUp" || (key === "Tab" && e.shiftKey) ? -1 : 1);
-    } else if (!isMac && e.altKey && /^[1-9]$/.test(key)) {
-      const target = key === "9" ? this.tabs.tabs.at(-1) : this.tabs.tabs[Number(key) - 1];
-      if (target) this.tabs.activate(target);
-    } else if (mod && (key === "=" || key === "+")) {
-      this.zoom(1);
-    } else if (mod && key === "-") {
-      this.zoom(-1);
-    } else if (mod && key === "0") {
-      this.zoom(0);
-    } else if (mod && key === ",") {
-      this.openSettings();
-    } else if (isMac && e.metaKey && !e.shiftKey && key === "t") {
-      this.sidebar.quickInput.focus();
-    } else if (isMac && e.metaKey && !e.shiftKey && key === "w") {
-      if (t) this.tabs.close(t);
-    } else if (isMac && e.metaKey && !e.shiftKey && key === "f") {
-      t?.openFind();
-    } else if (isMac && e.metaKey && !e.shiftKey && key === "k") {
-      t?.term.clear();
-    } else {
-      handled = false;
-    }
-    if (handled) {
+    if (document.querySelector("dialog[open]") || menuOpen()) return;
+    if (e.key === "F10" && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
       e.preventDefault();
-      e.stopPropagation();
+      this.menubar.focus();
+      return;
     }
+    const c = commands.match(e);
+    if (!c) return;
+    // In text fields, copy/paste/select-all belong to the field.
+    const editable = (e.target as HTMLElement).closest?.("input, textarea, select");
+    if (editable && c.id.startsWith("edit.")) return;
+    e.preventDefault();
+    e.stopPropagation();
+    commands.run(c.id);
   }
 }
 
-function fuzzy(hay: string, q: string): boolean {
-  return q.split(/\s+/).every((word) => {
-    if (hay.includes(word)) return true;
-    let i = 0;
-    for (const c of hay) if (c === word[i]) i++;
-    return i === word.length && word.length > 2;
+function stateWord(s: TabState): string {
+  return s === "connected" ? "Connected" : s === "connecting" ? "Connecting" : s === "closed" ? "Closed" : "";
+}
+
+function formatDuration(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  const hh = Math.floor(s / 3600);
+  const mm = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  return hh ? `${hh}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}` : `${mm}:${String(ss).padStart(2, "0")}`;
+}
+
+/**
+ * Palette ranking: every word must appear in the label or detail. Loose
+ * in-order letter matches ("rcn" for Reconnect) only count when nothing
+ * matches properly, so they don't bury real hits.
+ */
+function rankItems<T extends { label: string; sub?: string }>(items: T[], q: string): T[] {
+  const words = q.split(/\s+/);
+  const scored = items.map((item) => {
+    const label = item.label.toLowerCase();
+    const hay = `${label} ${(item.sub ?? "").toLowerCase()}`;
+    let score = 0;
+    if (words.every((w) => label.includes(w))) score = label.startsWith(words[0]) ? 4 : 3;
+    else if (words.every((w) => hay.includes(w))) score = 2;
+    else if (words.every((w) => w.length > 2 && subsequence(label, w))) score = 1;
+    return { item, score };
   });
+  const best = Math.max(0, ...scored.map((x) => x.score));
+  return scored
+    .filter((x) => x.score > 0 && (best === 1 || x.score > 1))
+    .sort((a, b) => b.score - a.score)
+    .map((x) => x.item);
+}
+
+function subsequence(hay: string, w: string): boolean {
+  let i = 0;
+  for (const c of hay) if (c === w[i]) i++;
+  return i === w.length;
 }
 
 new App().start().catch((e) => {

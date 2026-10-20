@@ -69,3 +69,14 @@ export async function playSendString(input: string, write: (s: string) => void |
     else await write(seg.text);
   }
 }
+
+/** Readable rendering of a send string for previews: "wr⏎⏸0.5s⏎", "^C". */
+export function describeSend(send: string): string {
+  return parseSendString(send)
+    .map((seg) =>
+      "pause" in seg
+        ? `\u23f8${seg.pause / 1000}s`
+        : seg.text.replace(/\r/g, "\u23ce").replace(/[\x00-\x1f]/g, (c) => `^${String.fromCharCode(c.charCodeAt(0) + 64)}`),
+    )
+    .join("");
+}

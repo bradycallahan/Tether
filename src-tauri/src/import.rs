@@ -36,7 +36,8 @@ fn walk(root: &Path, dir: &Path, report: &mut ImportReport) -> Result<()> {
             continue;
         }
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
-        if !name.to_lowercase().ends_with(".ini") || name.starts_with("__") || name.eq_ignore_ascii_case("Default.ini") {
+        if !name.to_lowercase().ends_with(".ini") || name.starts_with("__") || name.eq_ignore_ascii_case("Default.ini")
+        {
             continue;
         }
         let folder = path
@@ -60,7 +61,7 @@ fn walk(root: &Path, dir: &Path, report: &mut ImportReport) -> Result<()> {
 /// may write UTF-16LE.
 fn decode(bytes: &[u8]) -> String {
     if bytes.starts_with(&[0xFF, 0xFE]) {
-        let units: Vec<u16> = bytes[2..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let units: Vec<u16> = bytes[2..].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
         return String::from_utf16_lossy(&units);
     }
     let b = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
@@ -160,6 +161,12 @@ pub fn parse_session(text: &str, name: &str, folder: &str) -> Option<Session> {
         button_bar: None,
         login_script: String::new(),
         color_tag: None,
+        login_steps: Vec::new(),
+        login_timeout_secs: 15,
+        auto_reconnect: false,
+        anti_idle_secs: 0,
+        anti_idle_send: String::new(),
+        login_username: String::new(),
     })
 }
 
@@ -169,7 +176,8 @@ mod tests {
 
     #[test]
     fn parses_ssh_session() {
-        let text = "S:\"Protocol Name\"=SSH2\nS:\"Hostname\"=10.20.0.1\nD:\"[SSH2] Port\"=00000016\nS:\"Username\"=netadmin\n";
+        let text =
+            "S:\"Protocol Name\"=SSH2\nS:\"Hostname\"=10.20.0.1\nD:\"[SSH2] Port\"=00000016\nS:\"Username\"=netadmin\n";
         let s = parse_session(text, "core-sw1", "BSU/Core").unwrap();
         assert_eq!(s.folder, "BSU/Core");
         match s.protocol {
@@ -197,10 +205,8 @@ mod tests {
     #[test]
     fn skips_unsupported_and_reads_utf16() {
         assert!(parse_session("S:\"Protocol Name\"=TAPI\n", "x", "").is_none());
-        let utf16: Vec<u8> = [0xFF, 0xFE]
-            .into_iter()
-            .chain("S:\"Hostname\"=h".encode_utf16().flat_map(|u| u.to_le_bytes()))
-            .collect();
+        let utf16: Vec<u8> =
+            [0xFF, 0xFE].into_iter().chain("S:\"Hostname\"=h".encode_utf16().flat_map(|u| u.to_le_bytes())).collect();
         assert_eq!(decode(&utf16), "S:\"Hostname\"=h");
     }
 }

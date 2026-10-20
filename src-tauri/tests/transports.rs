@@ -89,10 +89,20 @@ fn target(auth: SshAuth, password: Option<String>, passphrase: Option<String>) -
     }
 }
 
-async fn run(t: ssh::Target, known_hosts: &std::path::Path) -> Result<(Captured, mpsc::UnboundedSender<Ctl>), CmdError> {
+async fn run(
+    t: ssh::Target,
+    known_hosts: &std::path::Path,
+) -> Result<(Captured, mpsc::UnboundedSender<Ctl>), CmdError> {
     let cap = Captured::default();
     let (tx, rx) = mpsc::unbounded_channel();
-    let params = ssh::Params { target: t, jump: None, term: "xterm-256color".into(), cols: 100, rows: 30, known_hosts: known_hosts.to_path_buf() };
+    let params = ssh::Params {
+        target: t,
+        jump: None,
+        term: "xterm-256color".into(),
+        cols: 100,
+        rows: 30,
+        known_hosts: known_hosts.to_path_buf(),
+    };
     ssh::start(params, cap.output(), rx).await?;
     Ok((cap, tx))
 }
@@ -111,7 +121,8 @@ async fn ssh_host_key_then_password_then_shell() {
     let err = run(target(SshAuth::Password, pass.clone(), None), &kh).await.err().expect("must ask about host key");
     assert_eq!(err.code, "HOSTKEY_UNKNOWN");
     let detail = err.detail.unwrap();
-    let (host, port, key) = (detail["host"].as_str().unwrap(), detail["port"].as_u64().unwrap() as u16, detail["key"].as_str().unwrap());
+    let (host, port, key) =
+        (detail["host"].as_str().unwrap(), detail["port"].as_u64().unwrap() as u16, detail["key"].as_str().unwrap());
     assert!(detail["fingerprint"].as_str().unwrap().starts_with("SHA256:"));
     ssh::trust(&kh, host, port, key, false).unwrap();
 
@@ -131,7 +142,9 @@ async fn ssh_host_key_then_password_then_shell() {
     assert!(cap.text().contains("40 132"), "resize not applied: {:?}", cap.text());
     tx.send(Ctl::Write(b"exit\n".to_vec())).unwrap();
     for _ in 0..60 {
-        if cap.status.lock().iter().any(|s| s.state == "closed") { break }
+        if cap.status.lock().iter().any(|s| s.state == "closed") {
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(cap.status.lock().iter().any(|s| s.state == "closed"));
@@ -144,7 +157,8 @@ async fn ssh_encrypted_key() {
     let auth = SshAuth::PublicKey { key_path: env("TETHER_TEST_KEY") };
     let first = run(target(auth.clone(), None, None), &kh).await.err().unwrap();
     let d = first.detail.unwrap();
-    ssh::trust(&kh, d["host"].as_str().unwrap(), d["port"].as_u64().unwrap() as u16, d["key"].as_str().unwrap(), false).unwrap();
+    ssh::trust(&kh, d["host"].as_str().unwrap(), d["port"].as_u64().unwrap() as u16, d["key"].as_str().unwrap(), false)
+        .unwrap();
 
     let err = run(target(auth.clone(), None, None), &kh).await.err().unwrap();
     assert_eq!(err.code, "NEED_PASSPHRASE");
@@ -174,7 +188,8 @@ async fn ssh_many_tiny_writes_arrive_in_order() {
     let pass = Some(env("TETHER_TEST_PASS"));
     let first = run(target(SshAuth::Password, pass.clone(), None), &kh).await.err().unwrap();
     let d = first.detail.unwrap();
-    ssh::trust(&kh, d["host"].as_str().unwrap(), d["port"].as_u64().unwrap() as u16, d["key"].as_str().unwrap(), false).unwrap();
+    ssh::trust(&kh, d["host"].as_str().unwrap(), d["port"].as_u64().unwrap() as u16, d["key"].as_str().unwrap(), false)
+        .unwrap();
     let (a, ta) = run(target(SshAuth::Password, pass.clone(), None), &kh).await.unwrap();
     let (b, tb) = run(target(SshAuth::Password, pass, None), &kh).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -183,7 +198,11 @@ async fn ssh_many_tiny_writes_arrive_in_order() {
             ta.send(Ctl::Write(vec![c])).unwrap();
             tb.send(Ctl::Write(vec![c])).unwrap();
         }
-        assert!(a.wait_for(&format!("\norder-{round}-ok")).await || a.wait_for(&format!("order-{round}-ok\r\n$")).await, "a round {round}: {:?}", a.text());
+        assert!(
+            a.wait_for(&format!("\norder-{round}-ok")).await || a.wait_for(&format!("order-{round}-ok\r\n$")).await,
+            "a round {round}: {:?}",
+            a.text()
+        );
         assert!(b.wait_for(&format!("order-{round}-ok\r\n$")).await, "b round {round}: {:?}", b.text());
     }
 }

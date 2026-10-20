@@ -40,6 +40,15 @@ export interface TerminalOptions {
   highlightSet: string | null;
   backspaceSendsDelete: boolean;
   encoding: string;
+  /** Terminal color scheme for this session; null follows Settings. */
+  colorScheme: string | null;
+}
+
+/** Wait for `expect` (plain text, or a regex when `regex`), then send `send`. */
+export interface LoginStep {
+  expect: string;
+  send: string;
+  regex: boolean;
 }
 
 export interface Session {
@@ -50,8 +59,16 @@ export interface Session {
   terminal: TerminalOptions;
   notes: string;
   buttonBar: string | null;
+  /** Legacy one-command-per-line script; superseded by loginSteps. */
   loginScript: string;
   colorTag: string | null;
+  loginSteps: LoginStep[];
+  loginTimeoutSecs: number;
+  autoReconnect: boolean;
+  antiIdleSecs: number;
+  antiIdleSend: string;
+  /** Login-action user name for non-SSH sessions ({username}). */
+  loginUsername: string;
 }
 
 export interface Button {
@@ -99,7 +116,27 @@ export interface Settings {
   showButtonBar: boolean;
   sidebarWidth: number;
   gpuRendering: boolean;
+  restoreWorkspace: boolean;
+  showToolbar: boolean;
+  showSidebar: boolean;
+  showStatusBar: boolean;
 }
+
+export interface WorkspaceTab {
+  session: Session;
+  saved: boolean;
+  title: string;
+  inBroadcast: boolean;
+}
+
+export interface Workspace {
+  tabs: WorkspaceTab[];
+  active: number;
+  tiled: boolean;
+  recent: string[];
+}
+
+export type SecretKind = "password" | "passphrase" | "enable";
 
 export interface StatusEvent {
   state: "connecting" | "connected" | "closed" | "error" | "warning";
@@ -132,6 +169,7 @@ export function defaultTerminal(): TerminalOptions {
     highlightSet: null,
     backspaceSendsDelete: true,
     encoding: "utf-8",
+    colorScheme: null,
   };
 }
 
@@ -161,6 +199,12 @@ export function newSession(partial: Partial<Session> = {}): Session {
     buttonBar: null,
     loginScript: "",
     colorTag: null,
+    loginSteps: [],
+    loginTimeoutSecs: 15,
+    autoReconnect: false,
+    antiIdleSecs: 0,
+    antiIdleSend: "",
+    loginUsername: "",
     ...partial,
   };
 }

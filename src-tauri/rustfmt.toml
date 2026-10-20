@@ -1,0 +1,4 @@
+# The code favors dense one-line expressions; keep that, but let rustfmt
+# own the layout so `cargo fmt --check` stays meaningful.
+max_width = 120
+use_small_heuristics = "Max"

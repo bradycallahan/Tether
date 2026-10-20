@@ -31,6 +31,15 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = "0.4"
 base64 = "0.22"
 strip-ansi-escapes = "0.2"
+regex = "1"
 dirs = "6"
 parking_lot = "0.12"
 log = "0.4"
+
+# Small, fast-starting release builds. The terminal's heavy lifting happens in
+# the webview, so optimizing the Rust side for size costs nothing noticeable.
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "s"
+strip = true

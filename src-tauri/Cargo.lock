@@ -5113,6 +5113,7 @@ dependencies = [
  "log",
  "parking_lot",
  "portable-pty",
+ "regex",
  "russh",
  "serde",
  "serde_json",

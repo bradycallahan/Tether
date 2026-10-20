@@ -1,5 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
-import type { ButtonBar, HighlightSet, ImportReport, PortInfo, Session, Settings, StatusEvent } from "./types";
+import type { ButtonBar, HighlightSet, ImportReport, PortInfo, SecretKind, Session, Settings, StatusEvent, Workspace } from "./types";
 
 export const api = {
   listSessions: () => invoke<Session[]>("list_sessions"),
@@ -12,7 +12,13 @@ export const api = {
   saveHighlights: (sets: HighlightSet[]) => invoke<void>("save_highlights", { sets }),
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
-  secretStatus: (id: string) => invoke<{ password: boolean; passphrase: boolean }>("secret_status", { id }),
+  getFolders: () => invoke<string[]>("get_folders"),
+  saveFolders: (folders: string[]) => invoke<void>("save_folders", { folders }),
+  getWorkspace: () => invoke<Workspace>("get_workspace"),
+  saveWorkspace: (workspace: Workspace) => invoke<void>("save_workspace", { workspace }),
+  secretStatus: (id: string) => invoke<Record<SecretKind, boolean>>("secret_status", { id }),
+  /** An empty value removes the secret. */
+  setSecret: (id: string, kind: SecretKind, value: string) => invoke<void>("set_secret", { id, kind, value }),
   forgetSecrets: (id: string) => invoke<void>("forget_secrets", { id }),
   importSecureCrt: (path: string) => invoke<ImportReport>("import_securecrt", { path }),
   listSerialPorts: () => invoke<PortInfo[]>("list_serial_ports"),

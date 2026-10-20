@@ -12,7 +12,7 @@ use russh::keys::{self, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::{cipher, kex, mac, ChannelMsg, Preferred};
 use serde_json::json;
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -65,11 +65,8 @@ impl client::Handler for Client {
         match keys::check_known_hosts_path(&self.host, self.port, &key, &self.known_hosts) {
             Ok(true) => Ok(true),
             Ok(false) => {
-                *self.issue.lock() = Some(HostKeyIssue::Unknown {
-                    fingerprint,
-                    key: openssh,
-                    algorithm: key.algorithm().to_string(),
-                });
+                *self.issue.lock() =
+                    Some(HostKeyIssue::Unknown { fingerprint, key: openssh, algorithm: key.algorithm().to_string() });
                 Ok(false)
             }
             Err(keys::Error::KeyChanged { line }) => {
@@ -128,17 +125,13 @@ fn host_key_error(issue: Option<HostKeyIssue>, host: &str, port: u16, fallback: 
     }
 }
 
-async fn open_handle<S>(t: &Target, known_hosts: &PathBuf, stream: Option<S>) -> CmdResult<Handle<Client>>
+async fn open_handle<S>(t: &Target, known_hosts: &Path, stream: Option<S>) -> CmdResult<Handle<Client>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let issue = Arc::new(Mutex::new(None));
-    let handler = Client {
-        host: t.host.clone(),
-        port: t.port,
-        known_hosts: known_hosts.clone(),
-        issue: issue.clone(),
-    };
+    let handler =
+        Client { host: t.host.clone(), port: t.port, known_hosts: known_hosts.to_path_buf(), issue: issue.clone() };
     let cfg = config(t);
     let result = match stream {
         Some(s) => client::connect_stream(cfg, s, handler).await,
@@ -146,7 +139,12 @@ where
             let addr = (t.host.as_str(), t.port);
             match tokio::time::timeout(Duration::from_secs(15), client::connect(cfg, addr, handler)).await {
                 Ok(r) => r,
-                Err(_) => return Err(CmdError::new("TIMEOUT", format!("{}:{} did not answer within 15 seconds.", t.host, t.port))),
+                Err(_) => {
+                    return Err(CmdError::new(
+                        "TIMEOUT",
+                        format!("{}:{} did not answer within 15 seconds.", t.host, t.port),
+                    ))
+                }
             }
         }
     };
@@ -171,7 +169,10 @@ async fn authenticate(h: &mut Handle<Client>, t: &Target) -> CmdResult<()> {
             let key = match keys::load_secret_key(&path, t.passphrase.as_deref()) {
                 Ok(k) => k,
                 Err(keys::Error::KeyIsEncrypted) => {
-                    return Err(CmdError::new("NEED_PASSPHRASE", format!("{} is protected by a passphrase.", path.display())))
+                    return Err(CmdError::new(
+                        "NEED_PASSPHRASE",
+                        format!("{} is protected by a passphrase.", path.display()),
+                    ))
                 }
                 Err(e) if t.passphrase.is_some() => {
                     return Err(CmdError::new("NEED_PASSPHRASE", format!("Could not unlock {}: {e}", path.display())))
@@ -201,10 +202,7 @@ async fn authenticate(h: &mut Handle<Client>, t: &Target) -> CmdResult<()> {
         return Ok(());
     }
     // Many network devices only offer keyboard-interactive.
-    let mut resp = h
-        .authenticate_keyboard_interactive_start(&user, None::<String>)
-        .await
-        .map_err(ssh_err)?;
+    let mut resp = h.authenticate_keyboard_interactive_start(&user, None::<String>).await.map_err(ssh_err)?;
     for _ in 0..6 {
         match resp {
             KeyboardInteractiveAuthResponse::Success => return Ok(()),
@@ -214,7 +212,11 @@ async fn authenticate(h: &mut Handle<Client>, t: &Target) -> CmdResult<()> {
                     .iter()
                     .map(|p| {
                         let q = p.prompt.to_lowercase();
-                        if p.echo && (q.contains("user") || q.contains("login")) { user.clone() } else { password.clone() }
+                        if p.echo && (q.contains("user") || q.contains("login")) {
+                            user.clone()
+                        } else {
+                            password.clone()
+                        }
                     })
                     .collect();
                 resp = h.authenticate_keyboard_interactive_respond(answers).await.map_err(ssh_err)?;
@@ -247,10 +249,7 @@ pub async fn start(p: Params, out: Output, mut rx: mpsc::UnboundedReceiver<Ctl>)
 
     let chan_err = |e: russh::Error| CmdError::new("CHANNEL", format!("Could not open a shell: {e}"));
     let channel = handle.channel_open_session().await.map_err(chan_err)?;
-    channel
-        .request_pty(false, &p.term, p.cols as u32, p.rows as u32, 0, 0, &[])
-        .await
-        .map_err(chan_err)?;
+    channel.request_pty(false, &p.term, p.cols as u32, p.rows as u32, 0, 0, &[]).await.map_err(chan_err)?;
     channel.request_shell(true).await.map_err(chan_err)?;
     let (mut read, write) = channel.split();
 
@@ -295,7 +294,7 @@ pub async fn start(p: Params, out: Output, mut rx: mpsc::UnboundedReceiver<Ctl>)
 }
 
 /// Record a host key the user chose to trust.
-pub fn trust(known_hosts: &PathBuf, host: &str, port: u16, key_openssh: &str, replace: bool) -> anyhow::Result<()> {
+pub fn trust(known_hosts: &Path, host: &str, port: u16, key_openssh: &str, replace: bool) -> anyhow::Result<()> {
     let key = keys::ssh_key::PublicKey::from_openssh(key_openssh)?;
     if replace {
         remove_host(known_hosts, host, port)?;
@@ -306,7 +305,7 @@ pub fn trust(known_hosts: &PathBuf, host: &str, port: u16, key_openssh: &str, re
 
 /// Drop every plain-text known_hosts entry for host:port (used when the user
 /// accepts a changed key). Hashed entries we didn't write are left alone.
-fn remove_host(known_hosts: &PathBuf, host: &str, port: u16) -> anyhow::Result<()> {
+fn remove_host(known_hosts: &Path, host: &str, port: u16) -> anyhow::Result<()> {
     let Ok(text) = std::fs::read_to_string(known_hosts) else { return Ok(()) };
     let pattern = if port == 22 { host.to_string() } else { format!("[{host}]:{port}") };
     let kept: Vec<&str> = text

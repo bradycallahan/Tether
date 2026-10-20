@@ -2,23 +2,29 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
 import { clear, h, icon } from "./dom";
 import { button, check, field, modal, toast } from "./dialogs";
-import { SCHEMES } from "./schemes";
+import { describeSend } from "./escapes";
+import { SCHEMES, scheme } from "./schemes";
 import { store } from "./state";
 import { compileRules } from "./highlight";
+import type { IconName } from "./commands";
 import {
   defaultProtocol,
   hostLabel,
+  newSession,
   PROTOCOL_NAMES,
+  type Button,
   type ButtonBar,
   type HighlightSet,
+  type LoginStep,
   type Protocol,
   type ProtocolKind,
+  type SecretKind,
   type Session,
   type Settings,
 } from "./types";
 
 const BAUDS = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
-const TAG_COLORS = ["", "#e5735f", "#f2b84b", "#7bc47f", "#6cb4e4", "#c49ae6", "#8d99a5"];
+export const TAG_COLORS = ["#e5735f", "#f2b84b", "#7bc47f", "#6cb4e4", "#c49ae6", "#8d99a5"];
 
 function input(value: string | number, attrs: Record<string, unknown> = {}) {
   return h("input", { type: typeof value === "number" ? "number" : "text", value: String(value), spellcheck: "false", ...attrs });
@@ -30,139 +36,181 @@ function select<T extends string | number>(value: T, options: [T, string][], onc
   return el;
 }
 
-function innerTabs(names: string[], panels: HTMLElement[]) {
-  const bar = h("div", { class: "tabs-inner", role: "tablist" });
-  const pick = (i: number) => {
-    panels.forEach((p, j) => (p.hidden = i !== j));
-    [...bar.children].forEach((b, j) => b.setAttribute("aria-selected", String(i === j)));
+function section(title: string, ...children: (Node | null)[]) {
+  return h("section", { class: "form-section" }, h("h3", {}, title), ...children);
+}
+
+function panel(...children: (Node | null)[]) {
+  return h("div", { class: "panel" }, ...children);
+}
+
+/**
+ * A category list on the left and one panel at a time on the right, like
+ * SecureCRT's options dialogs but flat: no nested trees.
+ */
+function categories(items: { name: string; icon: IconName; el: HTMLElement }[]) {
+  const nav = h("nav", { class: "catnav", role: "tablist", "aria-orientation": "vertical" });
+  const buttons = items.map((it, i) => {
+    const b = h("button", { type: "button", role: "tab", onclick: () => show(i) }, icon(it.icon), it.name);
+    nav.append(b);
+    return b;
+  });
+  const show = (i: number) => {
+    items.forEach((it, j) => (it.el.hidden = i !== j));
+    buttons.forEach((b, j) => b.setAttribute("aria-selected", String(i === j)));
   };
-  names.forEach((n, i) => bar.append(h("button", { type: "button", role: "tab", onclick: () => pick(i) }, n)));
-  pick(0);
-  return bar;
+  nav.addEventListener("keydown", (e) => {
+    const i = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    if (i < 0) return;
+    const next = e.key === "ArrowDown" ? i + 1 : e.key === "ArrowUp" ? i - 1 : -1;
+    if (next < 0 || next >= buttons.length) return;
+    e.preventDefault();
+    show(next);
+    buttons[next].focus();
+  });
+  show(0);
+  const el = h("div", { class: "catdlg" }, nav, h("div", { class: "catpanels" }, items.map((i) => i.el)));
+  return { el, show, nav };
 }
 
 // ---------------------------------------------------------------------------
-// Session editor
+// Protocol form, shared by the session editor and the quick connect dialog
 
-export async function editSession(original: Session, opts: { isNew: boolean }): Promise<{ session: Session; connect: boolean } | undefined> {
-  const s: Session = structuredClone(original);
-  const name = input(s.name, { placeholder: "e.g. core-sw1" });
-  const folder = input(s.folder, { placeholder: "e.g. BSU/Core switches", list: "tether-folders" });
-  const folderList = h("datalist", { id: "tether-folders" }, store.folders().map((f) => h("option", { value: f })));
-  const protoBox = h("div", { class: "dlg-section", style: { display: "grid", gap: "12px" } });
-  const errors = h("div", { class: "field" });
+interface ProtocolForm {
+  el: HTMLElement;
+  /** Validate and return the protocol, or an error message. */
+  collect(): Protocol | string;
+  kind(): ProtocolKind;
+  onKindChange(fn: (k: ProtocolKind) => void): void;
+  focus(): void;
+}
 
+function protocolForm(initial: Protocol, selfId: string | null): ProtocolForm {
+  let p: Protocol = structuredClone(initial);
+  const listeners: ((k: ProtocolKind) => void)[] = [];
+  const box = h("div", { class: "stack-12" });
   const kindSeg = h("div", { class: "seg-control", role: "radiogroup", "aria-label": "Protocol" });
   const kinds: ProtocolKind[] = ["ssh", "telnet", "serial", "raw", "local"];
+  let collect: () => Protocol | string = () => p;
+  let first: HTMLElement | null = null;
+
   const renderKinds = () => {
     clear(kindSeg);
     for (const k of kinds) {
       kindSeg.append(
         h("button", {
           type: "button",
-          "aria-pressed": String(s.protocol.kind === k),
+          role: "radio",
+          "aria-checked": String(p.kind === k),
+          "aria-pressed": String(p.kind === k),
           onclick: () => {
-            if (s.protocol.kind === k) return;
-            const old = s.protocol;
-            s.protocol = defaultProtocol(k);
-            if ("host" in old && "host" in s.protocol) s.protocol.host = old.host;
+            if (p.kind === k) return;
+            const old = collect();
+            const next = defaultProtocol(k);
+            const oldHost = typeof old === "object" && "host" in old ? old.host : "host" in p ? p.host : "";
+            if ("host" in next) next.host = oldHost;
+            p = next;
             renderKinds();
-            renderProto();
+            render();
+            listeners.forEach((fn) => fn(k));
           },
         }, PROTOCOL_NAMES[k]),
       );
     }
   };
 
-  // Protocol-specific controls are rebuilt on each kind change; `collect`
-  // reads them back into `s.protocol`.
-  let collect: () => string | null = () => null;
+  const portCheck = (v: string) => {
+    const n = Number(v);
+    return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null;
+  };
 
-  const renderProto = () => {
-    clear(protoBox);
-    const p = s.protocol;
-    secretBox.hidden = p.kind !== "ssh";
+  const render = () => {
+    clear(box);
     if (p.kind === "ssh") {
-      const host = input(p.host, { placeholder: "hostname or IP" });
-      const port = input(p.port, { min: 1, max: 65535 });
-      const user = input(p.username, { placeholder: "username" });
-      const authKind = select(p.auth.method, [["password", "Password / keyboard-interactive"], ["publicKey", "Public key"]], () => renderAuth());
-      const keyPath = input(p.auth.method === "publicKey" ? p.auth.keyPath : "", { placeholder: "~/.ssh/id_ed25519" });
+      const sp = p;
+      const host = input(sp.host, { placeholder: "Host name or IP address" });
+      const port = input(sp.port, { min: 1, max: 65535 });
+      const user = input(sp.username, { placeholder: "Ask me" });
+      const authKind = select(sp.auth.method, [["password", "Password or keyboard-interactive"], ["publicKey", "Public key"]], () => renderAuth());
+      const keyPath = input(sp.auth.method === "publicKey" ? sp.auth.keyPath : "", { placeholder: "~/.ssh/id_ed25519" });
       const browse = button("Browse…", {
         onclick: async () => {
           const f = await openDialog({ multiple: false, directory: false, title: "Choose a private key" });
           if (typeof f === "string") keyPath.value = f;
         },
       });
-      const keyRow = field("Private key file", h("div", { class: "inline" }, keyPath, browse), "OpenSSH, PEM or PuTTY-converted OpenSSH keys. Passphrases are asked for on connect.");
+      const keyRow = field("Private key", h("div", { class: "inline" }, keyPath, browse), "OpenSSH or PEM format. You'll be asked for the passphrase when connecting.");
       const renderAuth = () => (keyRow.hidden = authKind.value !== "publicKey");
       renderAuth();
-      const jumpOptions: [string, string][] = [["", "None"], ...store.sessions.filter((x) => x.protocol.kind === "ssh" && x.id !== s.id).map((x) => [x.id, `${x.folder ? x.folder + "/" : ""}${x.name}`] as [string, string])];
-      const jump = select(p.jumpSession ?? "", jumpOptions);
-      const legacy = h("input", { type: "checkbox", checked: p.legacyAlgorithms });
-      const keepalive = input(p.keepaliveSecs, { min: 0, max: 3600 });
-      protoBox.append(
+      const jumpOptions: [string, string][] = [["", "None: connect directly"], ...store.sessions.filter((x) => x.protocol.kind === "ssh" && x.id !== selfId).map((x) => [x.id, `${x.folder ? x.folder + "/" : ""}${x.name}`] as [string, string])];
+      const jump = select(sp.jumpSession ?? "", jumpOptions);
+      const legacy = h("input", { type: "checkbox", checked: sp.legacyAlgorithms });
+      box.append(
         h("div", { class: "grid3" }, field("Host", host), field("Port", port), field("Username", user)),
         field("Authentication", authKind),
         keyRow,
-        h("div", { class: "grid2" }, field("Jump host", jump, "Tunnel through another saved SSH session."), field("Keepalive (seconds)", keepalive, "0 turns it off.")),
-        check("Allow legacy algorithms", legacy, "SHA-1 key exchange, CBC ciphers — for old IOS and ASA boxes"),
+        field("Jump host", jump, "Connect through another saved SSH session, for devices you can only reach from a bastion."),
+        check("Allow legacy algorithms", legacy, "SHA-1 key exchange and CBC ciphers, for old IOS, ASA and ProCurve boxes"),
       );
+      first = host;
       collect = () => {
-        const portN = Number(port.value);
+        const portN = portCheck(port.value);
         if (!host.value.trim()) return "Enter a host name or IP address.";
-        if (!Number.isInteger(portN) || portN < 1 || portN > 65535) return "Port must be between 1 and 65535.";
-        if (authKind.value === "publicKey" && !keyPath.value.trim()) return "Choose a private key file.";
-        s.protocol = {
-          kind: "ssh",
+        if (portN === null) return "Port must be a number from 1 to 65535.";
+        if (authKind.value === "publicKey" && !keyPath.value.trim()) return "Choose a private key file, or switch to password authentication.";
+        return {
+          ...sp,
           host: host.value.trim(),
           port: portN,
           username: user.value.trim(),
           auth: authKind.value === "publicKey" ? { method: "publicKey", keyPath: keyPath.value.trim() } : { method: "password" },
           jumpSession: jump.value || null,
           legacyAlgorithms: legacy.checked,
-          keepaliveSecs: Math.max(0, Number(keepalive.value) || 0),
         };
-        return null;
       };
     } else if (p.kind === "telnet" || p.kind === "raw") {
-      const host = input(p.host, { placeholder: "hostname or IP" });
+      const kind = p.kind;
+      const host = input(p.host, { placeholder: "Host name or IP address" });
       const port = input(p.port, { min: 1, max: 65535 });
-      protoBox.append(
-        h("div", { class: "grid2" }, field("Host", host), field("Port", port, p.kind === "telnet" ? "Console servers usually use 2001 and up." : undefined)),
+      box.append(
+        h("div", { class: "grid2" }, field("Host", host), field("Port", port, kind === "telnet" ? "Console server lines usually start at 2001." : "Raw TCP sends bytes as-is, with no Telnet negotiation.")),
       );
+      first = host;
       collect = () => {
-        const portN = Number(port.value);
+        const portN = portCheck(port.value);
         if (!host.value.trim()) return "Enter a host name or IP address.";
-        if (!Number.isInteger(portN) || portN < 1 || portN > 65535) return "Port must be between 1 and 65535.";
-        s.protocol = { kind: p.kind, host: host.value.trim(), port: portN } as Protocol;
-        return null;
+        if (portN === null) return "Port must be a number from 1 to 65535.";
+        return { kind, host: host.value.trim(), port: portN };
       };
     } else if (p.kind === "serial") {
-      const port = input(p.port, { placeholder: "COM3 or /dev/ttyUSB0", list: "tether-ports" });
+      const sp = p;
+      const port = input(sp.port, { placeholder: "COM3 or /dev/ttyUSB0", list: "tether-ports" });
       const portList = h("datalist", { id: "tether-ports" });
       const found = h("span", { class: "hint" }, "Looking for serial ports…");
       const refresh = async () => {
         const ports = await api.listSerialPorts().catch(() => []);
         clear(portList);
         ports.forEach((x) => portList.append(h("option", { value: x.name }, x.description)));
-        found.textContent = ports.length ? `Found: ${ports.map((x) => (x.description ? `${x.name} (${x.description})` : x.name)).join(", ")}` : "No serial ports found. Plug in the adapter and refresh.";
+        found.textContent = ports.length
+          ? `Found: ${ports.map((x) => (x.description ? `${x.name} (${x.description})` : x.name)).join(", ")}`
+          : "No serial ports found. Plug in the adapter, then click Refresh.";
         if (!port.value && ports.length) port.value = ports[0].name;
       };
       refresh();
-      const baud = select(p.baud, BAUDS.map((b) => [b, String(b)] as [number, string]));
-      const bits = select(p.dataBits, [[8, "8"], [7, "7"], [6, "6"], [5, "5"]]);
-      const parity = select(p.parity, [["none", "None"], ["even", "Even"], ["odd", "Odd"]]);
-      const stop = select(p.stopBits, [[1, "1"], [2, "2"]]);
-      const flow = select(p.flow, [["none", "None"], ["software", "XON/XOFF"], ["hardware", "RTS/CTS"]]);
-      protoBox.append(
+      const baud = select(sp.baud, BAUDS.map((b) => [b, String(b)] as [number, string]));
+      const bits = select(sp.dataBits, [[8, "8"], [7, "7"], [6, "6"], [5, "5"]]);
+      const parity = select(sp.parity, [["none", "None"], ["even", "Even"], ["odd", "Odd"]]);
+      const stop = select(sp.stopBits, [[1, "1"], [2, "2"]]);
+      const flow = select(sp.flow, [["none", "None"], ["software", "XON/XOFF"], ["hardware", "RTS/CTS"]]);
+      box.append(
         h("div", { class: "field" }, h("span", {}, "Port"), h("div", { class: "inline" }, port, button("Refresh", { onclick: refresh })), found, portList),
-        h("div", { class: "grid2" }, field("Baud rate", baud, "Cisco consoles default to 9600 8N1."), field("Flow control", flow)),
+        h("div", { class: "grid2" }, field("Baud rate", baud, "Cisco, Aruba and Juniper consoles default to 9600 8N1."), field("Flow control", flow)),
         h("div", { class: "grid3" }, field("Data bits", bits), field("Parity", parity), field("Stop bits", stop)),
       );
+      first = port;
       collect = () => {
         if (!port.value.trim()) return "Choose a serial port.";
-        s.protocol = {
+        return {
           kind: "serial",
           port: port.value.trim(),
           baud: Number(baud.value),
@@ -171,114 +219,374 @@ export async function editSession(original: Session, opts: { isNew: boolean }): 
           stopBits: Number(stop.value),
           flow: flow.value as "none",
         };
-        return null;
       };
     } else {
-      const shell = input(p.shell, { placeholder: "Default shell" });
+      const shell = input(p.shell, { placeholder: "Your default shell" });
       api.defaultShell().then((d) => (shell.placeholder = `Default: ${d}`)).catch(() => {});
-      protoBox.append(field("Shell", shell, "Leave blank for your default shell. Arguments are allowed, e.g. wsl -d Ubuntu."));
-      collect = () => {
-        s.protocol = { kind: "local", shell: shell.value.trim() };
-        return null;
-      };
+      box.append(field("Shell", shell, "Leave blank for your default shell. Arguments work, e.g. wsl -d Ubuntu."));
+      first = shell;
+      collect = () => ({ kind: "local", shell: shell.value.trim() });
     }
   };
-  const secretBox = h("div", { class: "callout" }, "Checking saved credentials…");
   renderKinds();
-  renderProto();
+  render();
+  return {
+    el: h("div", { class: "stack-12" }, field("Protocol", kindSeg), box),
+    collect: () => collect(),
+    kind: () => p.kind,
+    onKindChange: (fn) => listeners.push(fn),
+    focus: () => first?.focus(),
+  };
+}
 
-  // Terminal tab
+// ---------------------------------------------------------------------------
+// Login actions (expect/send)
+
+const STEP_TEMPLATES: { name: string; ssh: boolean; steps: LoginStep[] }[] = [
+  {
+    name: "Cisco: enter enable mode",
+    ssh: true,
+    steps: [
+      { expect: ">", send: "enable\\r", regex: false },
+      { expect: "Password:", send: "{enable}\\r", regex: false },
+      { expect: "#", send: "terminal length 0\\r", regex: false },
+    ],
+  },
+  {
+    name: "Cisco: log in, then enable (Telnet or console)",
+    ssh: false,
+    steps: [
+      { expect: "Username:", send: "{username}\\r", regex: false },
+      { expect: "Password:", send: "{password}\\r", regex: false },
+      { expect: ">", send: "enable\\r", regex: false },
+      { expect: "Password:", send: "{enable}\\r", regex: false },
+      { expect: "#", send: "terminal length 0\\r", regex: false },
+    ],
+  },
+  { name: "Console server: wake the line", ssh: false, steps: [{ expect: "", send: "\\r", regex: false }] },
+  { name: "Cisco: turn off paging", ssh: true, steps: [{ expect: "#", send: "terminal length 0\\r", regex: false }] },
+  { name: "Juniper: turn off paging", ssh: true, steps: [{ expect: ">", send: "set cli screen-length 0\\r", regex: false }] },
+  { name: "Aruba / ProCurve: skip the banner", ssh: true, steps: [{ expect: "Press any key", send: " ", regex: false }, { expect: "#", send: "no page\\r", regex: false }] },
+];
+
+function loginStepsEditor(s: Session) {
+  // Older sessions kept one command per line; show them as steps.
+  let steps: LoginStep[] = s.loginSteps.length
+    ? structuredClone(s.loginSteps)
+    : s.loginScript.split(/\r?\n/).filter((l) => l.trim()).map((l) => ({ expect: "", send: /\\[rn]$/.test(l) ? l : `${l}\\r`, regex: false }));
+  const rows = h("div", { class: "steps" });
+  const timeout = input(s.loginTimeoutSecs || 15, { min: 1, max: 600, style: { width: "80px" } });
+
+  const render = () => {
+    clear(rows);
+    if (!steps.length) {
+      rows.append(h("div", { class: "steps-empty" }, "No login actions. Add a step, or start from a template."));
+    } else {
+      rows.append(h("div", { class: "step head" }, h("span", {}, ""), h("span", {}, "Wait for"), h("span", {}, "Then send"), h("span", {})));
+    }
+    steps.forEach((st, i) => {
+      const expect = input(st.expect, { class: "mono", placeholder: "Output settles", "aria-label": `Step ${i + 1}: wait for` });
+      const re = h("button", { type: "button", class: "re", title: "Treat as a regular expression", "aria-pressed": String(st.regex) }, ".*");
+      const send = input(st.send, { class: "mono", placeholder: "show clock\\r", "aria-label": `Step ${i + 1}: send` });
+      const validate = () => {
+        let ok = true;
+        if (st.regex && st.expect) {
+          try {
+            new RegExp(st.expect);
+          } catch {
+            ok = false;
+          }
+        }
+        expect.classList.toggle("invalid", !ok);
+        expect.title = ok ? "" : "Not a valid regular expression";
+      };
+      expect.addEventListener("input", () => {
+        st.expect = expect.value;
+        validate();
+      });
+      send.addEventListener("input", () => (st.send = send.value));
+      re.addEventListener("click", () => {
+        st.regex = !st.regex;
+        re.setAttribute("aria-pressed", String(st.regex));
+        validate();
+      });
+      validate();
+      const move = (d: number) => {
+        const j = i + d;
+        if (j < 0 || j >= steps.length) return;
+        [steps[i], steps[j]] = [steps[j], steps[i]];
+        render();
+      };
+      rows.append(
+        h("div", { class: "step" },
+          h("span", { class: "num" }, String(i + 1)),
+          h("div", { class: "expect" }, expect, re),
+          send,
+          h("div", { class: "mini" },
+            h("button", { type: "button", class: "btn ghost", title: "Move up", disabled: i === 0, onclick: () => move(-1) }, icon("up")),
+            h("button", { type: "button", class: "btn ghost", title: "Move down", disabled: i === steps.length - 1, onclick: () => move(1) }, icon("down")),
+            h("button", { type: "button", class: "btn ghost danger", title: "Remove step", onclick: () => { steps.splice(i, 1); render(); } }, icon("trash")),
+          ),
+        ),
+      );
+    });
+  };
+  render();
+
+  const templates = select("", [["", "Add from a template…"], ...STEP_TEMPLATES.map((t, i) => [String(i), t.name] as [string, string])]);
+  templates.addEventListener("change", () => {
+    const t = STEP_TEMPLATES[Number(templates.value)];
+    templates.value = "";
+    if (!t) return;
+    steps.push(...structuredClone(t.steps));
+    render();
+  });
+  const addBtn = button(h("span", { class: "inline" }, icon("plus"), "Add step"), {
+    onclick: () => {
+      steps.push({ expect: "", send: "", regex: false });
+      render();
+      (rows.querySelectorAll<HTMLInputElement>(".step:last-child input"))[0]?.focus();
+    },
+  });
+
+  const help = h("div", { class: "hint-block" },
+    h("p", {}, "Each step waits until the device shows the text (case doesn't matter), then sends the reply. Leave “Wait for” empty to send as soon as output settles."),
+    h("p", {}, h("code", {}, "\\r"), " presses Enter, ", h("code", {}, "\\p"), " pauses half a second, ", h("code", {}, "^C"), " sends Ctrl+C. ",
+      h("code", {}, "{username}"), ", ", h("code", {}, "{password}"), " and ", h("code", {}, "{enable}"), " are filled in from the session and the system keychain, so passwords never appear here."),
+  );
+  const el = h("div", { class: "stack-12" },
+    rows,
+    h("div", { class: "inline wrap" }, addBtn, templates),
+    h("div", { class: "inline" }, h("span", { class: "label-text" }, "Give up on a step after"), timeout, h("span", { class: "label-text" }, "seconds")),
+    help,
+  );
+  return {
+    el,
+    collect(): { steps: LoginStep[]; timeout: number } | string {
+      const bad = steps.findIndex((st) => {
+        if (!st.regex || !st.expect) return false;
+        try {
+          new RegExp(st.expect);
+          return false;
+        } catch {
+          return true;
+        }
+      });
+      if (bad >= 0) return `Login step ${bad + 1}: “${steps[bad].expect}” isn't a valid regular expression.`;
+      return {
+        steps: steps.filter((st) => st.expect || st.send),
+        timeout: clamp(Number(timeout.value), 1, 600, 15),
+      };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Session editor
+
+export interface SessionEditResult {
+  session: Session;
+  connect: boolean;
+  /** Secrets typed into the editor, to save once the session is saved. */
+  secrets: Partial<Record<SecretKind, string>>;
+}
+
+export async function editSession(original: Session, opts: { isNew: boolean; page?: "login" }): Promise<SessionEditResult | undefined> {
+  const s: Session = structuredClone(original);
+  const name = input(s.name, { placeholder: "e.g. core-sw1" });
+  const folder = input(s.folder, { placeholder: "Top level", list: "tether-folders" });
+  const folderList = h("datalist", { id: "tether-folders" }, store.folders().map((f) => h("option", { value: f })));
+  const errors = h("div", { class: "form-error", role: "alert" });
+  const proto = protocolForm(s.protocol, opts.isNew ? null : s.id);
+
+  // Credentials
+  const loginUser = input(s.loginUsername, { placeholder: "For {username} in login actions" });
+  const loginUserField = field("Username", loginUser);
+  const password = h("input", { type: "password", autocomplete: "off" });
+  const enable = h("input", { type: "password", autocomplete: "off" });
+  const credNote = h("span", { class: "hint" });
+  const saved = { password: false, enable: false };
+  const forget = button("Forget saved passwords", {
+    kind: "danger",
+    onclick: async () => {
+      await api.forgetSecrets(s.id);
+      saved.password = saved.enable = false;
+      forget.hidden = true;
+      renderCredNote();
+      toast("Saved passwords removed from the keychain.");
+    },
+  });
+  forget.hidden = true;
+  const credBox = section("Credentials",
+    loginUserField,
+    h("div", { class: "grid2" },
+      field("Password", password),
+      field("Enable password", enable),
+    ),
+    credNote,
+    forget,
+  );
+  const renderCredNote = () => {
+    const k = proto.kind();
+    const kept = "Saved in the keychain \u2014 type to replace";
+    credBox.hidden = k === "local";
+    loginUserField.hidden = k === "ssh";
+    password.placeholder = saved.password ? kept : k === "ssh" ? "Asked when connecting" : "Not saved";
+    enable.placeholder = saved.enable ? kept : "Not saved";
+    credNote.textContent = k === "ssh"
+      ? "Saved to your system keychain, never to Tether's files. Leave the password blank to be asked each time. The enable password is used by login actions."
+      : "Saved to your system keychain. Login actions send them with {username}, {password} and {enable}.";
+  };
+  if (!opts.isNew) {
+    api.secretStatus(s.id).then((st) => {
+      saved.password = st.password;
+      saved.enable = st.enable;
+      forget.hidden = !(st.password || st.passphrase || st.enable);
+      renderCredNote();
+    }).catch(() => {});
+  }
+  renderCredNote();
+  proto.onKindChange(renderCredNote);
+
+  // Login actions
+  const login = loginStepsEditor(s);
+
+  // Terminal
   const t = s.terminal;
   const highlightSel = select(t.highlightSet ?? "", [["", `Default (${store.settings.defaultHighlightSet ?? "none"})`], ...store.highlights.map((x) => [x.name, x.name] as [string, string])]);
-  const barSel = select(s.buttonBar ?? "", [["", "Keep current bar"], ...store.bars.map((b) => [b.name, b.name] as [string, string])]);
+  const barSel = select(s.buttonBar ?? "", [["", "Keep the current bar"], ...store.bars.map((b) => [b.name, b.name] as [string, string])]);
   const termType = input(t.termType);
   const bsDel = h("input", { type: "checkbox", checked: t.backspaceSendsDelete });
-  const logOn = h("input", { type: "checkbox", checked: t.logEnabled });
-  const logTpl = input(t.logTemplate, { class: "mono" });
-  const logTs = h("input", { type: "checkbox", checked: t.logTimestamps });
-  const logStrip = h("input", { type: "checkbox", checked: t.logStripAnsi });
-  const tagSel = h("div", { class: "inline" });
+
+  // Appearance
+  const schemeSel = select(t.colorScheme ?? "", [["", `Default (${store.settings.terminalScheme})`], ...Object.keys(SCHEMES).map((k) => [k, k] as [string, string])]);
+  const preview = h("div", { class: "scheme-preview" });
+  const renderPreview = () => schemePreview(preview, schemeSel.value || store.settings.terminalScheme);
+  schemeSel.addEventListener("change", renderPreview);
+  renderPreview();
   let tag = s.colorTag ?? "";
+  const tagSel = h("div", { class: "swatches", role: "radiogroup", "aria-label": "Color tag" });
   const renderTags = () => {
     clear(tagSel);
-    for (const c of TAG_COLORS) {
+    for (const c of ["", ...TAG_COLORS]) {
       tagSel.append(
         h("button", {
           type: "button",
-          class: "btn icon-only",
+          class: `swatch ${c ? "" : "none"}`,
           title: c ? c : "No color",
-          "aria-pressed": String(tag === c),
-          style: { background: c || "var(--panel-2)" },
-          onclick: () => { tag = c; renderTags(); },
-        }, c ? "" : "∅"),
+          role: "radio",
+          "aria-checked": String(tag === c),
+          style: { background: c || "" },
+          onclick: () => {
+            tag = c;
+            renderTags();
+          },
+        }, c ? "" : icon("close")),
       );
     }
   };
   renderTags();
 
-  const loginScript = h("textarea", { rows: "5", spellcheck: "false", placeholder: "terminal length 0\nshow clock" }, s.loginScript);
-  const notes = h("textarea", { rows: "6", style: { fontFamily: "var(--font-ui)", fontSize: "13px" } }, s.notes);
+  // Logging
+  const logOn = h("input", { type: "checkbox", checked: t.logEnabled });
+  const logTpl = input(t.logTemplate, { class: "mono" });
+  const logTs = h("input", { type: "checkbox", checked: t.logTimestamps });
+  const logStrip = h("input", { type: "checkbox", checked: t.logStripAnsi });
 
-  if (!opts.isNew) {
-    api.secretStatus(s.id).then((st) => {
-      clear(secretBox);
-      const parts = [st.password && "a password", st.passphrase && "a key passphrase"].filter(Boolean);
-      if (!parts.length) {
-        secretBox.textContent = "Nothing saved in the keychain for this session. You'll be asked when connecting.";
-        return;
-      }
-      secretBox.append(
-        h("span", {}, `The system keychain holds ${parts.join(" and ")} for this session. `),
-        button("Forget", {
-          kind: "danger",
-          onclick: async () => {
-            await api.forgetSecrets(s.id);
-            secretBox.textContent = "Forgotten. You'll be asked next time you connect.";
-          },
-        }),
-      );
-    });
-  } else {
-    secretBox.textContent = "Passwords are asked for on first connect and can be saved to your system keychain — never to Tether's files.";
-  }
+  // Advanced
+  const autoRe = h("input", { type: "checkbox", checked: s.autoReconnect });
+  const idleSecs = input(s.antiIdleSecs || 0, { min: 0, max: 86400, style: { width: "90px" } });
+  const idleSend = input(s.antiIdleSend, { class: "mono", placeholder: "\\r", style: { width: "120px" } });
+  const keepalive = input(s.protocol.kind === "ssh" ? s.protocol.keepaliveSecs : 30, { min: 0, max: 3600, style: { width: "90px" } });
+  const keepaliveRow = h("div", { class: "inline" }, h("span", { class: "label-text" }, "Send SSH keepalives every"), keepalive, h("span", { class: "label-text" }, "seconds (0 turns them off)"));
+  const renderAdvanced = () => (keepaliveRow.hidden = proto.kind() !== "ssh");
+  renderAdvanced();
+  proto.onKindChange(renderAdvanced);
 
-  const pConn = h("div", { style: { display: "grid", gap: "12px" } },
-    h("div", { class: "grid2" }, field("Name", name), h("label", { class: "field" }, h("span", {}, "Folder"), folder, folderList)),
-    field("Protocol", kindSeg),
-    protoBox,
-    secretBox,
-  );
-  const pTerm = h("div", { style: { display: "grid", gap: "12px" } },
-    h("div", { class: "grid2" }, field("Keyword highlighting", highlightSel), field("Button bar", barSel)),
-    h("div", { class: "grid2" }, field("Terminal type", termType), field("Color tag", tagSel)),
-    check("Backspace sends Delete (^?)", bsDel, "Turn off for gear that expects ^H"),
-    h("hr", { style: { border: 0, borderTop: "1px solid var(--rule)", margin: "2px 0" } }),
-    check("Log this session automatically", logOn),
-    field("Log file name", logTpl, "Tokens: {session} {host} {date} {time}. Saved in the log folder from Settings."),
-    h("div", { class: "grid2" }, check("Timestamp each line", logTs), check("Plain text (strip colors)", logStrip)),
-  );
-  const pAuto = h("div", { style: { display: "grid", gap: "12px" } },
-    field("Send after login", loginScript, "One command per line, sent after the prompt appears. Escapes like \\r, \\p (pause) and ^C work here."),
-  );
-  const pNotes = h("div", { style: { display: "grid", gap: "12px" } }, field("Notes", notes, "Searchable from the session filter. Rack location, serial number, change ticket…"));
-  const tabs = innerTabs(["Connection", "Terminal", "Automation", "Notes"], [pConn, pTerm, pAuto, pNotes]);
+  const notes = h("textarea", { rows: "12", class: "prose", placeholder: "Rack location, serial number, circuit ID, change ticket…" }, s.notes);
+
+  const cats = categories([
+    {
+      name: "Connection",
+      icon: "plug",
+      el: panel(
+        h("div", { class: "grid2" }, field("Name", name), h("label", { class: "field" }, h("span", {}, "Folder"), folder, folderList)),
+        proto.el,
+        credBox,
+      ),
+    },
+    {
+      name: "Login actions",
+      icon: "play",
+      el: panel(h("p", { class: "panel-intro" }, "Answer prompts automatically after connecting: log in on a console server, enter enable mode, turn off paging."), login.el),
+    },
+    {
+      name: "Terminal",
+      icon: "terminal",
+      el: panel(
+        h("div", { class: "grid2" }, field("Keyword highlighting", highlightSel), field("Button bar", barSel, "Switches to this bar when the tab is in front.")),
+        field("Terminal type", termType, "What the device is told the terminal is. xterm-256color suits almost everything; try vt100 for very old gear."),
+        check("Backspace sends Delete (^?)", bsDel, "Turn off for gear that expects ^H"),
+      ),
+    },
+    {
+      name: "Appearance",
+      icon: "palette",
+      el: panel(field("Color scheme", schemeSel), preview, h("div", { class: "field" }, h("span", {}, "Color tag"), tagSel, h("span", { class: "hint" }, "Shown on the tab and in the session manager. Red for production is a common habit."))),
+    },
+    {
+      name: "Logging",
+      icon: "log",
+      el: panel(
+        check("Log this session every time it connects", logOn),
+        field("Log file name", logTpl, "Tokens: {session} {host} {date} {time}. Files go in the log folder set in Settings."),
+        check("Timestamp each line", logTs),
+        check("Plain text (strip colors and escape codes)", logStrip),
+      ),
+    },
+    {
+      name: "Advanced",
+      icon: "sliders",
+      el: panel(
+        section("When the connection drops",
+          check("Reconnect automatically", autoRe, "Retries after 3, 5, 10 and 20 seconds, then every 30 seconds, until you stop it or it connects."),
+        ),
+        section("Idle timeouts",
+          h("div", { class: "inline wrap" }, h("span", { class: "label-text" }, "Send"), idleSend, h("span", { class: "label-text" }, "after"), idleSecs, h("span", { class: "label-text" }, "seconds without typing")),
+          h("span", { class: "hint" }, "Keeps devices with an exec-timeout from logging you out. 0 turns it off. \\r sends Enter; ^@ sends a null byte most devices ignore."),
+          keepaliveRow,
+        ),
+      ),
+    },
+    { name: "Notes", icon: "edit", el: panel(field("Notes", notes, "Searchable from the session filter.")) },
+  ]);
+  if (opts.page === "login") cats.show(1);
 
   return modal((done) => {
     const finish = (connect: boolean) => {
-      const err = collect();
       errors.textContent = "";
-      if (err) {
-        errors.append(h("span", { class: "err" }, err));
-        [...tabs.children][0]?.dispatchEvent(new MouseEvent("click"));
+      const p = proto.collect();
+      if (typeof p === "string") {
+        errors.textContent = p;
+        cats.show(0);
         return;
       }
-      s.name = name.value.trim() || hostLabel(s.protocol);
+      const l = login.collect();
+      if (typeof l === "string") {
+        errors.textContent = l;
+        cats.show(1);
+        return;
+      }
+      if (p.kind === "ssh") p.keepaliveSecs = clamp(Number(keepalive.value), 0, 3600, 30);
+      s.protocol = p;
+      s.name = name.value.trim() || hostLabel(p);
       s.folder = folder.value.split("/").map((x) => x.trim()).filter(Boolean).join("/");
       s.terminal = {
         ...t,
         termType: termType.value.trim() || "xterm-256color",
         backspaceSendsDelete: bsDel.checked,
         highlightSet: highlightSel.value || null,
+        colorScheme: schemeSel.value || null,
         logEnabled: logOn.checked,
         logTemplate: logTpl.value.trim() || "{session}_{date}_{time}.log",
         logTimestamps: logTs.checked,
@@ -286,46 +594,105 @@ export async function editSession(original: Session, opts: { isNew: boolean }): 
       };
       s.buttonBar = barSel.value || null;
       s.colorTag = tag || null;
-      s.loginScript = loginScript.value;
+      s.loginSteps = l.steps;
+      s.loginTimeoutSecs = l.timeout;
+      s.loginScript = "";
+      s.autoReconnect = autoRe.checked;
+      s.antiIdleSecs = clamp(Number(idleSecs.value), 0, 86400, 0);
+      s.antiIdleSend = idleSend.value || (s.antiIdleSecs ? "\\r" : "");
+      s.loginUsername = p.kind === "ssh" ? "" : loginUser.value.trim();
       s.notes = notes.value;
-      done({ session: s, connect });
+      const secrets: SessionEditResult["secrets"] = {};
+      if (password.value) secrets.password = password.value;
+      if (enable.value) secrets.enable = enable.value;
+      done({ session: s, connect, secrets });
     };
     return {
-      title: opts.isNew ? "New session" : `Edit ${original.name}`,
-      wide: true,
-      body: [tabs, pConn, pTerm, pAuto, pNotes, errors],
+      title: opts.isNew ? "New session" : `Session options: ${original.name}`,
+      className: "catdialog",
+      body: cats.el,
       focus: name,
-      footLeft: [],
+      footLeft: [errors],
       foot: [button("Cancel", { onclick: () => done(undefined) }), button("Save", { onclick: () => finish(false) }), button("Save and connect", { kind: "primary", submit: true })],
       onSubmit: () => finish(true),
     };
   });
 }
 
+function schemePreview(el: HTMLElement, name: string) {
+  const sc = scheme(name);
+  clear(el);
+  el.style.background = sc.background ?? "";
+  el.style.color = sc.foreground ?? "";
+  const c = (color: string | undefined, text: string) => h("span", { style: { color: color ?? "" } }, text);
+  el.append(
+    h("div", {}, "core-sw1#", c(sc.foreground, "show ip interface brief")),
+    h("div", {}, "Vlan10   ", c(sc.blue, "10.10.0.1"), "   YES NVRAM  ", c(sc.green, "up"), "        ", c(sc.green, "up")),
+    h("div", {}, "Gi1/0/2  unassigned  YES unset  ", c(sc.red, "down"), "      ", c(sc.red, "down")),
+    h("div", {}, c(sc.yellow, "%PM-4-ERR_DISABLE"), ": bpduguard error on ", c(sc.cyan, "Gi1/0/4")),
+    h("div", {}, "core-sw1#", h("span", { class: "cursor", style: { background: sc.cursor ?? sc.foreground ?? "" } }, " ")),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Quick connect dialog
+
+export async function quickConnectDialog(kind: ProtocolKind = "ssh"): Promise<{ session: Session; save: boolean } | undefined> {
+  const proto = protocolForm(defaultProtocol(kind), null);
+  const save = h("input", { type: "checkbox" });
+  const name = input("", { placeholder: "Defaults to the address" });
+  const folder = input("", { placeholder: "Top level", list: "tether-qc-folders" });
+  const saveBox = h("div", { class: "grid2", hidden: true },
+    field("Name", name),
+    h("label", { class: "field" }, h("span", {}, "Folder"), folder, h("datalist", { id: "tether-qc-folders" }, store.folders().map((f) => h("option", { value: f })))),
+  );
+  save.addEventListener("change", () => (saveBox.hidden = !save.checked));
+  const errors = h("div", { class: "form-error", role: "alert" });
+  if (kind === "serial") setTimeout(() => proto.focus(), 0);
+  return modal((done) => ({
+    title: "Quick connect",
+    intro: "Connect once without saving, or tick the box to keep it in the session manager.",
+    body: [proto.el, check("Save this session", save), saveBox],
+    footLeft: [errors],
+    foot: [button("Cancel", { onclick: () => done(undefined) }), button("Connect", { kind: "primary", submit: true })],
+    onSubmit: () => {
+      const p = proto.collect();
+      if (typeof p === "string") {
+        errors.textContent = p;
+        return;
+      }
+      const session = newSession({
+        name: name.value.trim() || hostLabel(p),
+        folder: folder.value.split("/").map((x) => x.trim()).filter(Boolean).join("/"),
+        protocol: p,
+      });
+      done({ session, save: save.checked });
+    },
+  }));
+}
+
 // ---------------------------------------------------------------------------
 // Settings
 
-export async function editSettings(actions: { importSecureCrt: () => void; editBars: () => void; editHighlights: () => void }): Promise<Settings | undefined> {
+export type SettingsPage = "appearance" | "terminal" | "highlighting" | "buttons" | "files";
+
+export async function editSettings(
+  actions: { importSecureCrt: () => void; editBars: () => void; editHighlights: () => void },
+  page?: SettingsPage,
+): Promise<Settings | undefined> {
   const s: Settings = structuredClone(store.settings);
-  const theme = h("div", { class: "seg-control" });
+  const theme = h("div", { class: "seg-control", role: "radiogroup", "aria-label": "Interface theme" });
   const renderTheme = () => {
     clear(theme);
-    (["system", "dark", "light"] as const).forEach((v) =>
-      theme.append(h("button", { type: "button", "aria-pressed": String(s.uiTheme === v), onclick: () => { s.uiTheme = v; renderTheme(); } }, v[0].toUpperCase() + v.slice(1))),
+    ([["system", "Match system"], ["dark", "Dark"], ["light", "Light"]] as const).forEach(([v, label]) =>
+      theme.append(h("button", { type: "button", role: "radio", "aria-checked": String(s.uiTheme === v), "aria-pressed": String(s.uiTheme === v), onclick: () => { s.uiTheme = v; renderTheme(); } }, label)),
     );
   };
   renderTheme();
   const schemeSel = select(s.terminalScheme, Object.keys(SCHEMES).map((k) => [k, k] as [string, string]));
-  const swatches = h("div", { class: "scheme-swatches" });
-  const renderSwatches = () => {
-    clear(swatches);
-    const sc = SCHEMES[schemeSel.value];
-    for (const c of [sc.background, sc.foreground, sc.red, sc.green, sc.yellow, sc.blue, sc.magenta, sc.cyan]) {
-      swatches.append(h("i", { style: { background: c ?? "transparent", outline: "1px solid var(--rule)" } }));
-    }
-  };
-  schemeSel.addEventListener("change", renderSwatches);
-  renderSwatches();
+  const preview = h("div", { class: "scheme-preview" });
+  schemeSel.addEventListener("change", () => schemePreview(preview, schemeSel.value));
+  schemePreview(preview, s.terminalScheme);
   const font = input(s.fontFamily, { class: "mono" });
   const size = input(s.fontSize, { min: 8, max: 40 });
   const lh = input(s.lineHeight, { min: 1, max: 2, step: 0.05 });
@@ -337,7 +704,8 @@ export async function editSettings(actions: { importSecureCrt: () => void; editB
   const rcPaste = h("input", { type: "checkbox", checked: s.rightClickPaste });
   const confirmPaste = h("input", { type: "checkbox", checked: s.confirmMultilinePaste });
   const reconnect = h("input", { type: "checkbox", checked: s.reconnectOnEnter });
-  const bell = select(s.bell, [["visual", "Flash the tab"], ["none", "Off"]]);
+  const restore = h("input", { type: "checkbox", checked: s.restoreWorkspace });
+  const bell = select(s.bell, [["visual", "Flash the terminal"], ["none", "Off"]]);
   const hlDefault = select(s.defaultHighlightSet ?? "", [["", "None"], ...store.highlights.map((x) => [x.name, x.name] as [string, string])]);
   const barDefault = select(s.defaultButtonBar ?? "", [["", "None"], ...store.bars.map((x) => [x.name, x.name] as [string, string])]);
   const logDir = input(s.logDirectory, { placeholder: "Inside Tether's data folder" });
@@ -347,45 +715,79 @@ export async function editSettings(actions: { importSecureCrt: () => void; editB
       if (typeof d === "string") logDir.value = d;
     },
   });
-  const dataDir = h("span", { class: "mono" }, "…");
+  const dataDir = h("span", { class: "mono path" }, "…");
   api.dataDir().then((d) => (dataDir.textContent = d)).catch(() => {});
 
-  const pLook = h("div", { style: { display: "grid", gap: "12px" } },
-    field("Interface", theme),
-    h("label", { class: "field" }, h("span", {}, "Terminal colors"), schemeSel, swatches),
-    field("Font", font, "A comma-separated list. The first installed font wins."),
-    h("div", { class: "grid3" }, field("Size", size), field("Line height", lh), field("Cursor", cursor)),
-    check("Blinking cursor", blink),
-    check("GPU-accelerated rendering", gpu, "Turn off if text stops redrawing on your graphics driver. Applies to new tabs."),
-  );
-  const pBehave = h("div", { style: { display: "grid", gap: "12px" } },
-    check("Copy on select", copySel),
-    check("Right-click pastes", rcPaste, "PuTTY style. Off shows a menu instead."),
-    check("Confirm before pasting more than one line", confirmPaste, "Stops a stray config dump hitting the wrong switch"),
-    check("Press Enter to reconnect a closed tab", reconnect),
-    h("div", { class: "grid2" }, field("Scrollback lines", scrollback), field("Bell", bell)),
-    h("div", { class: "grid2" },
-      h("div", { class: "field" }, h("span", {}, "Default highlighting"), hlDefault, h("button", { type: "button", class: "btn ghost", onclick: actions.editHighlights, style: { justifySelf: "start" } }, "Edit highlight rules…")),
-      h("div", { class: "field" }, h("span", {}, "Default button bar"), barDefault, h("button", { type: "button", class: "btn ghost", onclick: actions.editBars, style: { justifySelf: "start" } }, "Edit button bars…")),
-    ),
-  );
-  const pFiles = h("div", { style: { display: "grid", gap: "12px" } },
-    field("Log folder", h("div", { class: "inline" }, logDir, browse)),
-    h("div", { class: "field" }, h("span", {}, "Data folder"), dataDir, h("span", { class: "hint" }, "Sessions are plain TOML files here, one per session — safe to keep in Git. Put a file named tether.portable next to the app to keep everything beside it instead.")),
-    h("div", { class: "inline" },
-      button("Open data folder", { onclick: () => api.openFolder("data") }),
-      button("Open log folder", { onclick: () => api.openFolder("logs") }),
-      button(h("span", { class: "inline" }, icon("import"), "Import SecureCRT sessions…"), { onclick: actions.importSecureCrt }),
-    ),
-  );
-  const tabs = innerTabs(["Appearance", "Behavior", "Files"], [pLook, pBehave, pFiles]);
+  const cats = categories([
+    {
+      name: "Appearance",
+      icon: "palette",
+      el: panel(
+        field("Interface", theme),
+        field("Terminal colors", schemeSel, "Sessions can override this in their own options."),
+        preview,
+        field("Font", font, "A comma-separated list. The first one installed is used."),
+        h("div", { class: "grid3" }, field("Size", size), field("Line height", lh), field("Cursor", cursor)),
+        check("Blinking cursor", blink),
+        check("GPU-accelerated rendering", gpu, "Faster with huge outputs. Turn off if text stops redrawing on your graphics driver. Applies to new tabs."),
+      ),
+    },
+    {
+      name: "Terminal",
+      icon: "terminal",
+      el: panel(
+        section("Mouse and clipboard",
+          check("Copy text as soon as it's selected", copySel),
+          check("Right-click pastes", rcPaste, "PuTTY and SecureCRT style. Off shows a menu instead."),
+          check("Confirm before pasting more than one line", confirmPaste, "Shows what's about to be sent and where. Stops a stray config dump hitting the wrong switch."),
+        ),
+        section("Connections",
+          check("Press Enter in a closed tab to reconnect", reconnect),
+          check("Reopen last time's tabs when Tether starts", restore, "Tabs reconnect on their own. Broadcast always starts off."),
+        ),
+        h("div", { class: "grid2" }, field("Scrollback lines", scrollback), field("Bell", bell)),
+      ),
+    },
+    {
+      name: "Highlighting",
+      icon: "highlight",
+      el: panel(
+        field("Default rule set", hlDefault, "Used by every session that doesn't pick its own."),
+        h("div", {}, button(h("span", { class: "inline" }, icon("edit"), "Edit highlight rules…"), { onclick: actions.editHighlights })),
+      ),
+    },
+    {
+      name: "Button bars",
+      icon: "buttons",
+      el: panel(
+        field("Bar shown at startup", barDefault),
+        h("div", {}, button(h("span", { class: "inline" }, icon("edit"), "Edit button bars…"), { onclick: actions.editBars })),
+      ),
+    },
+    {
+      name: "Files",
+      icon: "folder",
+      el: panel(
+        field("Log folder", h("div", { class: "inline" }, logDir, browse)),
+        h("div", { class: "field" }, h("span", {}, "Data folder"), dataDir,
+          h("span", { class: "hint" }, "Sessions are plain TOML files here, one per session, safe to keep in Git. Put a file named tether.portable next to the app to keep everything beside it instead.")),
+        h("div", { class: "inline wrap" },
+          button("Open data folder", { onclick: () => api.openFolder("data") }),
+          button("Open log folder", { onclick: () => api.openFolder("logs") }),
+          button(h("span", { class: "inline" }, icon("import"), "Import SecureCRT sessions…"), { onclick: actions.importSecureCrt }),
+        ),
+      ),
+    },
+  ]);
+  const pages: SettingsPage[] = ["appearance", "terminal", "highlighting", "buttons", "files"];
+  if (page) cats.show(Math.max(0, pages.indexOf(page)));
 
   return modal((done) => ({
     title: "Settings",
-    wide: true,
-    body: [tabs, pLook, pBehave, pFiles],
+    className: "catdialog",
+    body: cats.el,
     foot: [button("Cancel", { onclick: () => done(undefined) }), button("Save", { kind: "primary", submit: true })],
-    focus: tabs.querySelector("button") as HTMLElement,
+    focus: cats.nav.querySelector("button[aria-selected=true]") as HTMLElement,
     onSubmit: () => {
       s.terminalScheme = schemeSel.value;
       s.fontFamily = font.value.trim() || store.settings.fontFamily;
@@ -399,6 +801,7 @@ export async function editSettings(actions: { importSecureCrt: () => void; editB
       s.rightClickPaste = rcPaste.checked;
       s.confirmMultilinePaste = confirmPaste.checked;
       s.reconnectOnEnter = reconnect.checked;
+      s.restoreWorkspace = restore.checked;
       s.bell = bell.value as Settings["bell"];
       s.defaultHighlightSet = hlDefault.value || null;
       s.defaultButtonBar = barDefault.value || null;
@@ -415,13 +818,81 @@ function clamp(n: number, lo: number, hi: number, fallback: number) {
 // ---------------------------------------------------------------------------
 // Button bars
 
+/** Edit (or create, with `index` null) one button on a bar. */
+export async function editButton(barName: string, index: number | null): Promise<ButtonBar[] | undefined> {
+  const bars: ButtonBar[] = structuredClone(store.bars);
+  let bar = bars.find((b) => b.name === barName);
+  if (!bar) {
+    bar = { name: barName || "My buttons", buttons: [] };
+    bars.push(bar);
+  }
+  const b: Button = index === null ? { label: "", send: "", color: null } : structuredClone(bar.buttons[index]);
+  const label = input(b.label, { placeholder: "e.g. int brief" });
+  const send = input(b.send, { class: "mono", placeholder: "show ip interface brief\\r" });
+  const enter = h("input", { type: "checkbox", checked: index === null || /\\r$/.test(b.send) });
+  const out = h("div", { class: "send-preview" });
+  const update = () => {
+    out.textContent = send.value ? `Sends: ${describeSend(send.value)}${enter.checked && !/\\r$/.test(send.value) ? "⏎" : ""}` : "";
+  };
+  send.addEventListener("input", update);
+  enter.addEventListener("change", update);
+  update();
+  let color = b.color ?? "";
+  const swatches = h("div", { class: "swatches", role: "radiogroup", "aria-label": "Color" });
+  const renderSw = () => {
+    clear(swatches);
+    for (const c of ["", ...TAG_COLORS]) {
+      swatches.append(h("button", {
+        type: "button",
+        class: `swatch ${c ? "" : "none"}`,
+        title: c || "No color",
+        role: "radio",
+        "aria-checked": String(color === c),
+        style: { background: c || "" },
+        onclick: () => {
+          color = c;
+          renderSw();
+        },
+      }, c ? "" : icon("close")));
+    }
+  };
+  renderSw();
+  const errors = h("div", { class: "form-error", role: "alert" });
+  return modal((done) => ({
+    title: index === null ? `New button on “${bar!.name}”` : `Edit button “${b.label || b.send}”`,
+    body: [
+      field("Label", label),
+      field("Send", send, "Escapes: \\r Enter, \\p pause, ^C Ctrl+C, \\xHH any byte."),
+      check("Press Enter at the end", enter),
+      out,
+      h("div", { class: "field" }, h("span", {}, "Color"), swatches),
+    ],
+    focus: label,
+    footLeft: [errors],
+    foot: [button("Cancel", { onclick: () => done(undefined) }), button(index === null ? "Add button" : "Save", { kind: "primary", submit: true })],
+    onSubmit: () => {
+      if (!send.value && !label.value.trim()) {
+        errors.textContent = "Give the button something to send.";
+        return;
+      }
+      let text = send.value;
+      if (enter.checked && !/\\r$/.test(text)) text += "\\r";
+      if (!enter.checked) text = text.replace(/\\r$/, "");
+      const next: Button = { label: label.value.trim() || text.replace(/\\r$/, ""), send: text, color: color || null };
+      if (index === null) bar!.buttons.push(next);
+      else bar!.buttons[index] = next;
+      done(bars);
+    },
+  }));
+}
+
 export async function editButtonBars(initialBar?: string): Promise<ButtonBar[] | undefined> {
   const bars: ButtonBar[] = structuredClone(store.bars);
   if (!bars.length) bars.push({ name: "My buttons", buttons: [] });
   let current = Math.max(0, bars.findIndex((b) => b.name === initialBar));
-  const barSel = h("select");
+  const barSel = h("select", { "aria-label": "Bar" });
   const rows = h("div", { class: "rows" });
-  const barName = input("", { placeholder: "Bar name" });
+  const barName = input("", { placeholder: "Bar name", "aria-label": "Bar name" });
 
   const renderSel = () => {
     clear(barSel);
@@ -441,11 +912,12 @@ export async function editButtonBars(initialBar?: string): Promise<ButtonBar[] |
   const renderRows = () => {
     clear(rows);
     const bar = bars[current];
-    rows.append(h("div", { class: "rowedit buttons rowhead" }, h("span", {}, "Label"), h("span", {}, "Sends"), h("span", {}, "Color"), h("span", {})));
+    if (!bar.buttons.length) rows.append(h("div", { class: "steps-empty" }, "No buttons yet."));
+    else rows.append(h("div", { class: "rowedit buttons rowhead" }, h("span", {}, "Label"), h("span", {}, "Sends"), h("span", {}, "Color"), h("span", {})));
     bar.buttons.forEach((b, i) => {
       const label = input(b.label, { placeholder: "Label" });
       const send = input(b.send, { placeholder: "show version\\r", class: "mono" });
-      const color = h("input", { type: "color", value: b.color ?? "#6cb4e4" });
+      const color = h("input", { type: "color", value: b.color ?? "#6cb4e4", title: "Color" });
       label.addEventListener("input", () => (b.label = label.value));
       send.addEventListener("input", () => (b.send = send.value));
       color.addEventListener("input", () => (b.color = color.value));
@@ -458,8 +930,8 @@ export async function editButtonBars(initialBar?: string): Promise<ButtonBar[] |
       rows.append(
         h("div", { class: "rowedit buttons" }, label, send, color,
           h("div", { class: "mini" },
-            h("button", { type: "button", class: "btn ghost", title: "Move up", onclick: () => move(-1) }, icon("up")),
-            h("button", { type: "button", class: "btn ghost", title: "Move down", onclick: () => move(1) }, icon("down")),
+            h("button", { type: "button", class: "btn ghost", title: "Move up", disabled: i === 0, onclick: () => move(-1) }, icon("up")),
+            h("button", { type: "button", class: "btn ghost", title: "Move down", disabled: i === bar.buttons.length - 1, onclick: () => move(1) }, icon("down")),
             h("button", { type: "button", class: "btn ghost danger", title: "Remove", onclick: () => { bar.buttons.splice(i, 1); renderRows(); } }, icon("trash")),
           ),
         ),
@@ -467,7 +939,13 @@ export async function editButtonBars(initialBar?: string): Promise<ButtonBar[] |
     });
     rows.append(
       h("div", { class: "inline" },
-        button(h("span", { class: "inline" }, icon("plus"), "Add button"), { onclick: () => { bar.buttons.push({ label: "", send: "", color: null }); renderRows(); (rows.querySelectorAll(".rowedit.buttons input")[(bar.buttons.length - 1) * 3] as HTMLInputElement | undefined)?.focus(); } }),
+        button(h("span", { class: "inline" }, icon("plus"), "Add button"), {
+          onclick: () => {
+            bar.buttons.push({ label: "", send: "", color: null });
+            renderRows();
+            (rows.querySelectorAll(".rowedit.buttons:not(.rowhead)")[bar.buttons.length - 1]?.querySelector("input") as HTMLInputElement | null)?.focus();
+          },
+        }),
       ),
     );
   };
@@ -476,7 +954,7 @@ export async function editButtonBars(initialBar?: string): Promise<ButtonBar[] |
 
   return modal((done) => ({
     title: "Button bars",
-    intro: "Buttons send text to the active tab — or every checked tab while broadcasting. End a command with \\r to press Enter. \\p pauses half a second, ^C sends Ctrl+C.",
+    intro: "Buttons send text to the active tab, or to every checked tab while broadcasting. End with \\r to press Enter; \\p pauses half a second; ^C sends Ctrl+C.",
     wide: true,
     body: [
       h("div", { class: "inline" }, barSel, barName,
@@ -497,8 +975,8 @@ export async function editHighlights(): Promise<HighlightSet[] | undefined> {
   const sets: HighlightSet[] = structuredClone(store.highlights);
   if (!sets.length) sets.push({ name: "My highlights", rules: [] });
   let current = 0;
-  const setSel = h("select");
-  const setName = input("", { placeholder: "Set name" });
+  const setSel = h("select", { "aria-label": "Rule set" });
+  const setName = input("", { placeholder: "Set name", "aria-label": "Set name" });
   const rows = h("div", { class: "rows" });
   const sample = h("div", { class: "paste-preview", style: { whiteSpace: "pre-wrap" } });
   const SAMPLE = "Gi1/0/12 is up, line protocol is up\nGi1/0/13 is down, line protocol is down (notconnect)\n%LINK-3-UPDOWN: Interface Te1/1/1, changed state to down\nVlan20  10.20.0.1/24  aabb.cc00.0102";
@@ -512,7 +990,10 @@ export async function editHighlights(): Promise<HighlightSet[] | undefined> {
         r.re.lastIndex = 0;
         let m: RegExpExecArray | null;
         while ((m = r.re.exec(line))) {
-          if (!m[0]) { r.re.lastIndex++; continue; }
+          if (!m[0]) {
+            r.re.lastIndex++;
+            continue;
+          }
           marks.push({ s: m.index, e: m.index + m[0].length, fg: r.fg, bg: r.bg });
         }
       }
@@ -551,7 +1032,7 @@ export async function editHighlights(): Promise<HighlightSet[] | undefined> {
         if (isRe.checked && pat.value) {
           try { new RegExp(pat.value); } catch { ok = false; }
         }
-        pat.style.borderColor = ok ? "" : "var(--fault)";
+        pat.classList.toggle("invalid", !ok);
         pat.title = ok ? "" : "Not a valid regular expression";
       };
       pat.addEventListener("input", () => { r.pattern = pat.value; validate(); renderSample(); });

@@ -27,6 +27,8 @@ pub struct StatusEvent {
 type DataFn = dyn Fn(&[u8]) + Send + Sync;
 type StatusFn = dyn Fn(StatusEvent) + Send + Sync;
 
+type Tap = mpsc::UnboundedSender<Vec<u8>>;
+
 /// Where a transport sends what it receives. In the app these forward to
 /// Tauri IPC channels; in tests they can collect into a buffer.
 #[derive(Clone)]
@@ -34,6 +36,8 @@ pub struct Output {
     data: Arc<DataFn>,
     status: Arc<StatusFn>,
     pub logger: Arc<Mutex<Option<Logger>>>,
+    /// A copy of received bytes for the login-action engine while it runs.
+    tap: Arc<Mutex<Option<Tap>>>,
 }
 
 impl Output {
@@ -41,7 +45,16 @@ impl Output {
         data: impl Fn(&[u8]) + Send + Sync + 'static,
         status: impl Fn(StatusEvent) + Send + Sync + 'static,
     ) -> Self {
-        Self { data: Arc::new(data), status: Arc::new(status), logger: Arc::new(Mutex::new(None)) }
+        Self {
+            data: Arc::new(data),
+            status: Arc::new(status),
+            logger: Arc::new(Mutex::new(None)),
+            tap: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn set_tap(&self, tap: Option<Tap>) {
+        *self.tap.lock() = tap;
     }
 
     pub fn data(&self, bytes: &[u8]) {
@@ -50,6 +63,9 @@ impl Output {
         }
         if let Some(l) = self.logger.lock().as_mut() {
             l.write(bytes);
+        }
+        if let Some(t) = self.tap.lock().as_ref() {
+            let _ = t.send(bytes.to_vec());
         }
         (self.data)(bytes);
     }

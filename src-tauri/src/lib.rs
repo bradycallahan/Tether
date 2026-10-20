@@ -1,6 +1,7 @@
 //! Tether — an open-source terminal for SSH, Telnet, serial and local shells.
 
 pub mod conn;
+pub mod expect;
 pub mod import;
 pub mod local;
 pub mod logger;
@@ -51,9 +52,30 @@ fn save_sessions(state: State<AppState>, sessions: Vec<Session>) -> CmdResult<()
 #[tauri::command]
 fn delete_session(state: State<AppState>, id: String) -> CmdResult<()> {
     state.store.delete_session(&id)?;
-    let _ = secrets::delete(&id, secrets::PASSWORD);
-    let _ = secrets::delete(&id, secrets::PASSPHRASE);
+    for kind in SECRET_KINDS {
+        let _ = secrets::delete(&id, kind);
+    }
     Ok(())
+}
+
+#[tauri::command]
+fn get_folders(state: State<AppState>) -> CmdResult<Vec<String>> {
+    Ok(state.store.folders()?)
+}
+
+#[tauri::command]
+fn save_folders(state: State<AppState>, folders: Vec<String>) -> CmdResult<()> {
+    Ok(state.store.save_folders(&folders)?)
+}
+
+#[tauri::command]
+fn get_workspace(state: State<AppState>) -> Workspace {
+    state.store.workspace()
+}
+
+#[tauri::command]
+fn save_workspace(state: State<AppState>, workspace: Workspace) -> CmdResult<()> {
+    Ok(state.store.save_workspace(&workspace)?)
 }
 
 #[tauri::command]
@@ -86,25 +108,41 @@ fn save_settings(state: State<AppState>, settings: Settings) -> CmdResult<()> {
     Ok(state.store.save_settings(&settings)?)
 }
 
+const SECRET_KINDS: [&str; 3] = [secrets::PASSWORD, secrets::PASSPHRASE, secrets::ENABLE];
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SecretStatus {
     password: bool,
     passphrase: bool,
+    enable: bool,
 }
 
 #[tauri::command]
 fn secret_status(id: String) -> SecretStatus {
+    let has = |kind| secrets::get(&id, kind).ok().flatten().is_some();
     SecretStatus {
-        password: secrets::get(&id, secrets::PASSWORD).ok().flatten().is_some(),
-        passphrase: secrets::get(&id, secrets::PASSPHRASE).ok().flatten().is_some(),
+        password: has(secrets::PASSWORD),
+        passphrase: has(secrets::PASSPHRASE),
+        enable: has(secrets::ENABLE),
     }
+}
+
+/// Save (or, with an empty value, remove) one secret for a session.
+#[tauri::command]
+fn set_secret(id: String, kind: String, value: String) -> CmdResult<()> {
+    let Some(kind) = SECRET_KINDS.into_iter().find(|k| *k == kind) else {
+        return Err(CmdError::new("ARG", "Unknown kind of secret."));
+    };
+    let r = if value.is_empty() { secrets::delete(&id, kind) } else { secrets::set(&id, kind, &value) };
+    r.map_err(|e| CmdError::new("KEYCHAIN", format!("The system keychain refused it: {e:#}")))
 }
 
 #[tauri::command]
 fn forget_secrets(id: String) -> CmdResult<()> {
-    secrets::delete(&id, secrets::PASSWORD)?;
-    secrets::delete(&id, secrets::PASSPHRASE)?;
+    for kind in SECRET_KINDS {
+        secrets::delete(&id, kind)?;
+    }
     Ok(())
 }
 
@@ -136,9 +174,7 @@ fn open_folder(app: tauri::AppHandle, state: State<AppState>, which: String) -> 
         _ => return Err(CmdError::new("ARG", "unknown folder")),
     };
     std::fs::create_dir_all(&path)?;
-    app.opener()
-        .open_path(path.to_string_lossy(), None::<&str>)
-        .map_err(|e| CmdError::new("OPEN", e.to_string()))
+    app.opener().open_path(path.to_string_lossy(), None::<&str>).map_err(|e| CmdError::new("OPEN", e.to_string()))
 }
 
 #[tauri::command]
@@ -180,11 +216,21 @@ fn host_label(p: &Protocol) -> String {
     match p {
         Protocol::Ssh { host, port, username, .. } => {
             let user = if username.is_empty() { String::new() } else { format!("{username}@") };
-            if *port == 22 { format!("{user}{host}") } else { format!("{user}{host}:{port}") }
+            if *port == 22 {
+                format!("{user}{host}")
+            } else {
+                format!("{user}{host}:{port}")
+            }
         }
         Protocol::Telnet { host, port } | Protocol::Raw { host, port } => format!("{host}:{port}"),
         Protocol::Serial { port, baud, .. } => format!("{port} @ {baud}"),
-        Protocol::Local { shell } => if shell.is_empty() { "local shell".into() } else { shell.clone() },
+        Protocol::Local { shell } => {
+            if shell.is_empty() {
+                "local shell".into()
+            } else {
+                shell.clone()
+            }
+        }
     }
 }
 
@@ -249,13 +295,27 @@ async fn connect(
         }
     }
 
+    // Install the login-action tap before the transport starts so the first
+    // prompt can't slip past it.
+    let steps = expect::effective_steps(s);
+    let tap_rx = if steps.is_empty() {
+        None
+    } else {
+        let (tap_tx, tap_rx) = mpsc::unbounded_channel();
+        out.set_tap(Some(tap_tx));
+        Some(tap_rx)
+    };
+
     let (tx, rx) = mpsc::unbounded_channel();
     let term = s.terminal.term_type.clone();
     let result = match &s.protocol {
         Protocol::Ssh { jump_session, .. } => {
             let jump = match jump_session.as_deref().filter(|j| !j.is_empty()) {
                 Some(jid) => {
-                    let js = state.store.get_session(jid).map_err(|_| CmdError::new("JUMP", "The jump host session no longer exists."))?;
+                    let js = state
+                        .store
+                        .get_session(jid)
+                        .map_err(|_| CmdError::new("JUMP", "The jump host session no longer exists."))?;
                     let mut t = ssh_target(&js.id, &js.protocol, args.jump_password.clone(), None)?;
                     if t.password.is_none() && matches!(t.auth, SshAuth::Password) {
                         return Err(CmdError::new("NEED_PASSWORD", format!("Password for jump host {}", js.name))
@@ -279,9 +339,15 @@ async fn connect(
             let r = ssh::start(params, out.clone(), rx).await;
             if r.is_ok() && args.remember && args.saved {
                 let mut results = Vec::new();
-                if let Some(pw) = &args.password { results.push(secrets::set(&s.id, secrets::PASSWORD, pw)); }
-                if let Some(pp) = &args.passphrase { results.push(secrets::set(&s.id, secrets::PASSPHRASE, pp)); }
-                if let (Some((jid, _)), Some(jp)) = (&jump, &args.jump_password) { results.push(secrets::set(jid, secrets::PASSWORD, jp)); }
+                if let Some(pw) = &args.password {
+                    results.push(secrets::set(&s.id, secrets::PASSWORD, pw));
+                }
+                if let Some(pp) = &args.passphrase {
+                    results.push(secrets::set(&s.id, secrets::PASSPHRASE, pp));
+                }
+                if let (Some((jid, _)), Some(jp)) = (&jump, &args.jump_password) {
+                    results.push(secrets::set(jid, secrets::PASSWORD, jp));
+                }
                 if let Some(Err(e)) = results.into_iter().find(|r| r.is_err()) {
                     out.status("warning", format!("Couldn't save to the system keychain ({e:#}). Tether will remember it until this tab closes."));
                 }
@@ -300,15 +366,36 @@ async fn connect(
             telnet::start(host.clone(), *port, false, term, args.cols, args.rows, out.clone(), rx).await
         }
         Protocol::Serial { port, baud, data_bits, parity, stop_bits, flow } => {
-            let p = serial::Params { port: port.clone(), baud: *baud, data_bits: *data_bits, parity: *parity, stop_bits: *stop_bits, flow: *flow };
+            let p = serial::Params {
+                port: port.clone(),
+                baud: *baud,
+                data_bits: *data_bits,
+                parity: *parity,
+                stop_bits: *stop_bits,
+                flow: *flow,
+            };
             serial::start(p, out.clone(), rx).await
         }
         Protocol::Local { shell } => local::start(shell.clone(), args.cols, args.rows, out.clone(), rx).await,
     };
 
     if let Err(e) = result {
+        out.set_tap(None);
         out.status("error", e.message.clone());
         return Err(e);
+    }
+    if let Some(tap_rx) = tap_rx {
+        let username = match &s.protocol {
+            Protocol::Ssh { username, .. } => username.clone(),
+            _ => s.login_username.clone(),
+        };
+        let creds = expect::Secrets {
+            username,
+            password: args.password.clone().or_else(|| secrets::get(&s.id, secrets::PASSWORD).ok().flatten()),
+            enable: secrets::get(&s.id, secrets::ENABLE).ok().flatten(),
+        };
+        let timeout = std::time::Duration::from_secs(s.login_timeout_secs.clamp(1, 600) as u64);
+        tokio::spawn(expect::run(steps, timeout, tap_rx, tx.clone(), out.clone(), creds));
     }
     state.manager.insert(
         args.conn_id,
@@ -382,7 +469,12 @@ pub fn run() {
             save_highlights,
             get_settings,
             save_settings,
+            get_folders,
+            save_folders,
+            get_workspace,
+            save_workspace,
             secret_status,
+            set_secret,
             forget_secrets,
             import_securecrt,
             list_serial_ports,

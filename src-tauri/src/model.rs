@@ -19,11 +19,43 @@ pub struct Session {
     /// Optional button bar to show when this session is focused.
     #[serde(default)]
     pub button_bar: Option<String>,
-    /// Commands sent automatically after login (one per line, escapes allowed).
+    /// Legacy login commands (one per line), from before expect/send steps.
+    /// Still honored when `login_steps` is empty; the editor converts them.
     #[serde(default)]
     pub login_script: String,
     #[serde(default)]
     pub color_tag: Option<String>,
+    /// Expect/send login actions, run in order once the transport is up.
+    #[serde(default)]
+    pub login_steps: Vec<LoginStep>,
+    /// How long each login step waits for its prompt before giving up.
+    #[serde(default = "default_login_timeout")]
+    pub login_timeout_secs: u32,
+    /// Reconnect by itself when the connection drops (not when the user disconnects).
+    #[serde(default)]
+    pub auto_reconnect: bool,
+    /// Send `anti_idle_send` after this many seconds without typing. 0 = off.
+    #[serde(default)]
+    pub anti_idle_secs: u32,
+    #[serde(default)]
+    pub anti_idle_send: String,
+    /// User name for login actions on Telnet, serial and raw sessions (SSH
+    /// keeps its own in the protocol). Sent where a step says {username}.
+    #[serde(default)]
+    pub login_username: String,
+}
+
+/// One expect/send pair. An empty `expect` sends as soon as output settles.
+/// `send` uses the send-string escapes (\r, \p, ^C …) plus the tokens
+/// {username}, {password} and {enable}, which are filled in by the backend
+/// so saved secrets never travel to the UI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LoginStep {
+    pub expect: String,
+    pub send: String,
+    /// Treat `expect` as a regular expression instead of plain text.
+    pub regex: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -116,6 +148,8 @@ pub struct TerminalOptions {
     pub highlight_set: Option<String>,
     pub backspace_sends_delete: bool,
     pub encoding: String,
+    /// Terminal color scheme for this session; None follows Settings.
+    pub color_scheme: Option<String>,
 }
 
 impl Default for TerminalOptions {
@@ -129,16 +163,32 @@ impl Default for TerminalOptions {
             highlight_set: None,
             backspace_sends_delete: true,
             encoding: "utf-8".into(),
+            color_scheme: None,
         }
     }
 }
 
-fn default_ssh_port() -> u16 { 22 }
-fn default_telnet_port() -> u16 { 23 }
-fn default_keepalive() -> u32 { 30 }
-fn default_baud() -> u32 { 9600 }
-fn default_data_bits() -> u8 { 8 }
-fn default_stop_bits() -> u8 { 1 }
+fn default_ssh_port() -> u16 {
+    22
+}
+fn default_telnet_port() -> u16 {
+    23
+}
+fn default_keepalive() -> u32 {
+    30
+}
+fn default_login_timeout() -> u32 {
+    15
+}
+fn default_baud() -> u32 {
+    9600
+}
+fn default_data_bits() -> u8 {
+    8
+}
+fn default_stop_bits() -> u8 {
+    1
+}
 
 // ---------------------------------------------------------------------------
 // Button bars
@@ -212,6 +262,11 @@ pub struct Settings {
     pub show_button_bar: bool,
     pub sidebar_width: u32,
     pub gpu_rendering: bool,
+    /// Reopen last run's tabs on startup.
+    pub restore_workspace: bool,
+    pub show_toolbar: bool,
+    pub show_sidebar: bool,
+    pub show_status_bar: bool,
 }
 
 impl Default for Settings {
@@ -219,7 +274,9 @@ impl Default for Settings {
         Self {
             ui_theme: "system".into(),
             terminal_scheme: "Patch Bay".into(),
-            font_family: "\"Cascadia Mono\", \"JetBrains Mono\", \"SF Mono\", Menlo, Consolas, \"DejaVu Sans Mono\", monospace".into(),
+            font_family:
+                "\"Cascadia Mono\", \"JetBrains Mono\", \"SF Mono\", Menlo, Consolas, \"DejaVu Sans Mono\", monospace"
+                    .into(),
             font_size: 14,
             line_height: 1.15,
             cursor_style: "block".into(),
@@ -238,8 +295,43 @@ impl Default for Settings {
             sidebar_width: 260,
             // WebKitGTK can stall repaints of background WebGL canvases.
             gpu_rendering: !cfg!(target_os = "linux"),
+            restore_workspace: true,
+            show_toolbar: true,
+            show_sidebar: true,
+            show_status_bar: true,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Workspace: what was open last time, plus recently used sessions
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Workspace {
+    pub tabs: Vec<WorkspaceTab>,
+    pub active: usize,
+    pub tiled: bool,
+    /// Ids of saved sessions, most recent first.
+    pub recent: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceTab {
+    /// Snapshot of the session (without secrets) so quick-connect tabs
+    /// can come back too. Saved sessions are refreshed from the library.
+    pub session: Session,
+    #[serde(default)]
+    pub saved: bool,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default = "yes")]
+    pub in_broadcast: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -266,6 +358,12 @@ mod tests {
             button_bar: None,
             login_script: String::new(),
             color_tag: None,
+            login_steps: vec![LoginStep { expect: "Password:".into(), send: "{enable}\\r".into(), regex: false }],
+            login_timeout_secs: 15,
+            auto_reconnect: true,
+            anti_idle_secs: 0,
+            anti_idle_send: String::new(),
+            login_username: String::new(),
         };
         let text = toml::to_string_pretty(&s).unwrap();
         let back: Session = toml::from_str(&text).unwrap();
@@ -288,5 +386,32 @@ mod tests {
             }
             _ => panic!("wrong protocol"),
         }
+        assert_eq!(s.login_timeout_secs, 15, "old files get the default timeout");
+        assert!(s.login_steps.is_empty() && !s.auto_reconnect);
+    }
+
+    #[test]
+    fn workspace_round_trips_through_toml() {
+        let text = r#"
+            id = "x"
+            name = "console"
+            [protocol]
+            kind = "serial"
+            port = "COM3"
+        "#;
+        let session: Session = toml::from_str(text).unwrap();
+        let w = Workspace {
+            tabs: vec![WorkspaceTab { session, saved: true, title: "console".into(), in_broadcast: false }],
+            active: 0,
+            tiled: true,
+            recent: vec!["x".into()],
+        };
+        let back: Workspace = toml::from_str(&toml::to_string_pretty(&w).unwrap()).unwrap();
+        assert_eq!(w, back);
+        // The UI reads these names (src/types.ts); a serde rename here once
+        // broke startup.
+        let json = serde_json::to_value(&w).unwrap();
+        assert!(json["tabs"].is_array() && json["recent"].is_array());
+        assert!(json["tabs"][0]["inBroadcast"].is_boolean());
     }
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseSendString } from "../src/escapes";
+import { describeSend, parseSendString } from "../src/escapes";
 import { parseQuickConnect } from "../src/quickconnect";
 
 describe("send strings", () => {
@@ -10,6 +10,11 @@ describe("send strings", () => {
   });
   it("splits on pauses", () => {
     expect(parseSendString("wr\\r\\p\\r")).toEqual([{ text: "wr\r" }, { pause: 500 }, { text: "\r" }]);
+  });
+  it("describes what a button will send", () => {
+    expect(describeSend("copy run start\\r\\p\\r")).toBe("copy run start\u23ce\u23f80.5s\u23ce");
+    expect(describeSend("^C")).toBe("^C");
+    expect(describeSend("\\t")).toBe("^I");
   });
   it("leaves unknown escapes alone", () => {
     expect(parseSendString("c:\\qa\\z")).toEqual([{ text: "c:\\qa\\z" }]);

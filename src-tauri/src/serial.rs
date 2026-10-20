@@ -25,9 +25,17 @@ pub fn list_ports() -> Vec<PortInfo> {
             let description = match p.port_type {
                 SerialPortType::UsbPort(u) => {
                     let mut parts = Vec::new();
-                    if let Some(m) = u.manufacturer { parts.push(m) }
-                    if let Some(pr) = u.product { parts.push(pr) }
-                    if parts.is_empty() { format!("USB {:04x}:{:04x}", u.vid, u.pid) } else { parts.join(" ") }
+                    if let Some(m) = u.manufacturer {
+                        parts.push(m)
+                    }
+                    if let Some(pr) = u.product {
+                        parts.push(pr)
+                    }
+                    if parts.is_empty() {
+                        format!("USB {:04x}:{:04x}", u.vid, u.pid)
+                    } else {
+                        parts.join(" ")
+                    }
                 }
                 SerialPortType::BluetoothPort => "Bluetooth".into(),
                 SerialPortType::PciPort => "Built-in".into(),
@@ -42,7 +50,8 @@ pub fn list_ports() -> Vec<PortInfo> {
 
 /// "COM10" sorts after "COM9".
 fn natural_key(s: &str) -> (String, u32) {
-    let digits: String = s.chars().rev().take_while(|c| c.is_ascii_digit()).collect::<Vec<_>>().into_iter().rev().collect();
+    let digits: String =
+        s.chars().rev().take_while(|c| c.is_ascii_digit()).collect::<Vec<_>>().into_iter().rev().collect();
     let prefix = s[..s.len() - digits.len()].to_lowercase();
     (prefix, digits.parse().unwrap_or(0))
 }
@@ -81,7 +90,11 @@ pub async fn start(p: Params, out: Output, mut rx: mpsc::UnboundedReceiver<Ctl>)
         let hint = match e.kind {
             serialport::ErrorKind::NoDevice => " Is the cable plugged in?",
             serialport::ErrorKind::Io(ErrorKind::PermissionDenied) => {
-                if cfg!(target_os = "linux") { " On Linux, add yourself to the dialout group." } else { " Another program may have the port open." }
+                if cfg!(target_os = "linux") {
+                    " On Linux, add yourself to the dialout group."
+                } else {
+                    " Another program may have the port open."
+                }
             }
             _ => "",
         };

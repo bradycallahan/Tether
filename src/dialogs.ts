@@ -1,4 +1,4 @@
-import { h, icon } from "./dom";
+import { h } from "./dom";
 
 export interface DialogParts {
   title: string;
@@ -68,7 +68,7 @@ export function check(label: string, input: HTMLInputElement, hint?: string): HT
   return h("label", { class: "check" }, input, h("span", {}, label), hint ? h("span", { class: "hint" }, hint) : null);
 }
 
-export function button(label: string | Node, opts: { kind?: "primary" | "danger" | "ghost" | "danger solid"; submit?: boolean; onclick?: () => void; title?: string } = {}) {
+export function button(label: string | Node, opts: { kind?: "primary" | "danger" | "ghost" | "danger solid" | "warn"; submit?: boolean; onclick?: () => void; title?: string } = {}) {
   return h(
     "button",
     { type: opts.submit ? "submit" : "button", class: `btn ${opts.kind ?? ""}`, onclick: opts.onclick, title: opts.title },
@@ -162,90 +162,30 @@ export async function hostKeyDialog(detail: Record<string, unknown>, changed: bo
   }))) === true;
 }
 
-export async function pasteConfirm(text: string): Promise<boolean> {
+export async function pasteConfirm(text: string, target: { label: string; many: boolean }): Promise<boolean> {
   const lines = text.split(/\r\n|\r|\n/);
+  if (lines.at(-1) === "") lines.pop();
   const count = lines.length;
   return (await modal<boolean>((done) => ({
-    title: `Paste ${count} lines?`,
-    intro: "Each line runs as soon as it lands. Check it's going to the right device.",
-    body: h("div", { class: "paste-preview" }, lines.slice(0, 200).join("\n") + (count > 200 ? `\n… ${count - 200} more` : "")),
-    foot: [button("Cancel", { onclick: () => done(false) }), button(`Paste ${count} lines`, { kind: "primary", submit: true })],
+    title: `Paste ${count} lines into ${target.label}?`,
+    intro: target.many
+      ? h("span", { class: "warn-text" }, `Broadcast is on. Every line goes to ${target.label} and runs as soon as it lands.`)
+      : "Each line runs as soon as it lands. Check it's going to the right device.",
+    body: h("div", { class: "paste-preview" }, lines.slice(0, 200).join("\n") + (count > 200 ? `\n\u2026 ${count - 200} more` : "")),
+    foot: [button("Cancel", { onclick: () => done(false) }), button(`Paste ${count} lines`, { kind: target.many ? "warn" : "primary", submit: true })],
     onSubmit: () => done(true),
   }))) === true;
 }
 
 // ---------------------------------------------------------------------------
-// Context menus and toasts
-
-export interface MenuItem {
-  label: string;
-  action: () => void;
-  danger?: boolean;
-  shortcut?: string;
-  separatorBefore?: boolean;
-  icon?: Parameters<typeof icon>[0];
-}
-
-let openMenu: HTMLElement | null = null;
-
-export function showMenu(x: number, y: number, items: MenuItem[]) {
-  closeMenu();
-  const menu = h("div", { class: "menu", role: "menu" });
-  for (const it of items) {
-    if (it.separatorBefore) menu.append(h("hr"));
-    menu.append(
-      h(
-        "button",
-        {
-          class: it.danger ? "danger" : "",
-          role: "menuitem",
-          onclick: () => {
-            closeMenu();
-            it.action();
-          },
-        },
-        it.icon ? icon(it.icon) : null,
-        it.label,
-        it.shortcut ? h("span", { class: "kbd" }, it.shortcut) : null,
-      ),
-    );
-  }
-  document.body.append(menu);
-  const r = menu.getBoundingClientRect();
-  menu.style.left = `${Math.min(x, innerWidth - r.width - 6)}px`;
-  menu.style.top = `${Math.min(y, innerHeight - r.height - 6)}px`;
-  openMenu = menu;
-  (menu.querySelector("button") as HTMLButtonElement | null)?.focus();
-  menu.addEventListener("keydown", (e) => {
-    const buttons = [...menu.querySelectorAll("button")];
-    const i = buttons.indexOf(document.activeElement as HTMLButtonElement);
-    if (e.key === "ArrowDown") buttons[(i + 1) % buttons.length].focus();
-    else if (e.key === "ArrowUp") buttons[(i - 1 + buttons.length) % buttons.length].focus();
-    else if (e.key === "Escape") closeMenu();
-    else return;
-    e.preventDefault();
-  });
-  setTimeout(() => {
-    addEventListener("pointerdown", outside, { capture: true });
-    addEventListener("blur", closeMenu, { once: true });
-  });
-}
-
-function outside(e: Event) {
-  if (openMenu && !openMenu.contains(e.target as Node)) closeMenu();
-}
-
-export function closeMenu() {
-  openMenu?.remove();
-  openMenu = null;
-  removeEventListener("pointerdown", outside, { capture: true });
-}
+// Toasts
 
 let toastTimer: number | undefined;
-export function toast(message: string, ms = 2600) {
+export function toast(message: string, opts: { ms?: number; action?: { label: string; run: () => void } } = {}) {
   document.querySelector(".toast")?.remove();
-  const el = h("div", { class: "toast", role: "status" }, message);
+  const el = h("div", { class: "toast", role: "status" }, h("span", {}, message),
+    opts.action ? h("button", { type: "button", class: "btn ghost", onclick: () => { el.remove(); opts.action!.run(); } }, opts.action.label) : null);
   document.body.append(el);
   clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => el.remove(), ms);
+  toastTimer = window.setTimeout(() => el.remove(), opts.ms ?? (opts.action ? 6000 : 2600));
 }

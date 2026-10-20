@@ -54,11 +54,7 @@ impl Logger {
         }
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         let buf = BufWriter::new(file);
-        let out = if t.strip_ansi {
-            Sink::Plain(strip_ansi_escapes::Writer::new(buf))
-        } else {
-            Sink::Raw(buf)
-        };
+        let out = if t.strip_ansi { Sink::Plain(strip_ansi_escapes::Writer::new(buf)) } else { Sink::Raw(buf) };
         let mut logger = Self { path, out, timestamps: t.timestamps, at_line_start: true };
         let banner = format!(
             "\n===== Tether log opened {} — {} ({}) =====\n",
@@ -75,11 +71,7 @@ impl Logger {
     }
 
     pub fn write(&mut self, data: &[u8]) {
-        let result = if self.timestamps {
-            self.write_stamped(data)
-        } else {
-            self.out.write_all(data)
-        };
+        let result = if self.timestamps { self.write_stamped(data) } else { self.out.write_all(data) };
         if let Err(e) = result.and_then(|_| self.out.flush()) {
             log::warn!("log write failed for {}: {e}", self.path.display());
         }
@@ -106,9 +98,7 @@ impl Logger {
 pub fn render_template(template: &str, session: &str, host: &str) -> String {
     let now = Local::now();
     let clean = |s: &str| -> String {
-        s.chars()
-            .map(|c| if c.is_alphanumeric() || "-_.".contains(c) { c } else { '_' })
-            .collect()
+        s.chars().map(|c| if c.is_alphanumeric() || "-_.".contains(c) { c } else { '_' }).collect()
     };
     let t = if template.trim().is_empty() { "{session}_{date}_{time}.log" } else { template };
     t.replace("{session}", &clean(session))
