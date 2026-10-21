@@ -80,6 +80,8 @@ pub struct ConnHandle {
     pub output: Output,
     pub session_name: String,
     pub host_label: String,
+    /// The device's host name or address, for network sessions.
+    pub host: Option<String>,
     pub terminal: crate::model::TerminalOptions,
 }
 
@@ -106,6 +108,11 @@ impl Manager {
         if let Some(h) = self.conns.lock().remove(id) {
             let _ = h.tx.send(Ctl::Close);
         }
+    }
+
+    /// Host names of open network connections.
+    pub fn hosts(&self) -> Vec<String> {
+        self.conns.lock().values().filter_map(|h| h.host.clone()).collect()
     }
 
     pub fn with<R>(&self, id: &str, f: impl FnOnce(&ConnHandle) -> R) -> Option<R> {

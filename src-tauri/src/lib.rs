@@ -14,6 +14,7 @@ pub mod serial;
 pub mod ssh;
 pub mod store;
 pub mod telnet;
+pub mod tftp;
 pub mod vault;
 pub mod window;
 
@@ -36,6 +37,7 @@ struct AppState {
     placement: window::Placement,
     /// What the command line asked to open, until the UI is ready for it.
     launch: parking_lot::Mutex<Vec<launch::Target>>,
+    tftp: parking_lot::Mutex<Option<tftp::Server>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +257,7 @@ fn open_folder(app: tauri::AppHandle, state: State<AppState>, which: String) -> 
     let path = match which.as_str() {
         "logs" => state.store.log_dir(&settings),
         "data" => state.store.root().to_path_buf(),
+        "tftp" => state.store.tftp_dir(&settings),
         _ => return Err(CmdError::new("ARG", "unknown folder")),
     };
     std::fs::create_dir_all(&path)?;
@@ -568,7 +571,19 @@ async fn connect(
     }
     state.manager.insert(
         args.conn_id,
-        ConnHandle { tx, output: out, session_name: s.name.clone(), host_label: label, terminal: s.terminal.clone() },
+        ConnHandle {
+            tx,
+            output: out,
+            session_name: s.name.clone(),
+            host_label: label,
+            host: match &s.protocol {
+                Protocol::Ssh { host, .. } | Protocol::Telnet { host, .. } | Protocol::Raw { host, .. } => {
+                    Some(host.clone())
+                }
+                _ => None,
+            },
+            terminal: s.terminal.clone(),
+        },
     );
     Ok(ConnectInfo { log_path })
 }
@@ -620,6 +635,138 @@ fn set_logging(state: State<AppState>, conn_id: String, enabled: bool) -> CmdRes
     }
 }
 
+// ---------------------------------------------------------------------------
+// TFTP server
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct TftpStatus {
+    running: bool,
+    /// The address it listens on; empty for every interface.
+    address: String,
+    port: u16,
+    folder: String,
+    /// This computer's addresses, to type into the device.
+    addresses: Vec<tftp::LocalAddress>,
+}
+
+fn tftp_status_of(state: &AppState) -> CmdResult<TftpStatus> {
+    let settings = state.store.settings()?;
+    let running = state.tftp.lock().as_ref().map(|s| s.local_addr());
+    let (address, port) = match running {
+        Some(a) if a.ip().is_unspecified() => (String::new(), a.port()),
+        Some(a) => (a.ip().to_string(), a.port()),
+        None => (settings.tftp_address.trim().to_string(), settings.tftp_port),
+    };
+    Ok(TftpStatus {
+        running: running.is_some(),
+        address,
+        port,
+        folder: state.store.tftp_dir(&settings).to_string_lossy().into_owned(),
+        addresses: tftp::local_addresses(),
+    })
+}
+
+/// One line in tftp.log in the log folder, like a server log.
+fn tftp_log(store: &Store, line: &str) {
+    use std::io::Write as _;
+    let Ok(settings) = store.settings() else { return };
+    let dir = store.log_dir(&settings);
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("tftp.log")) {
+        let _ = writeln!(f, "{} {line}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+    }
+}
+
+fn tftp_log_transfer(store: &Store, t: &tftp::Transfer) {
+    let verb = match t.direction {
+        tftp::Direction::Send => "sent to",
+        tftp::Direction::Receive => "received from",
+    };
+    let line = match t.state {
+        tftp::TransferState::Active => return,
+        tftp::TransferState::Done => format!("{} {verb} {}: {} bytes in {} ms", t.file, t.peer, t.bytes, t.elapsed_ms),
+        tftp::TransferState::Failed | tftp::TransferState::Refused => {
+            let what = if t.direction == tftp::Direction::Send { "read" } else { "write" };
+            let state = if t.state == tftp::TransferState::Refused { "refused" } else { "failed" };
+            format!("{what} {} from {} {state}: {}", t.file, t.peer, t.error.as_deref().unwrap_or("no reason given"))
+        }
+    };
+    tftp_log(store, &line);
+}
+
+fn tftp_bind_error(e: &std::io::Error, addr: std::net::SocketAddr) -> CmdError {
+    let port = addr.port();
+    let msg = match e.kind() {
+        std::io::ErrorKind::AddrInUse => format!(
+            "UDP port {port} is already in use, probably by another TFTP server. Stop that one, or choose another port in Settings > TFTP server."
+        ),
+        std::io::ErrorKind::AddrNotAvailable => format!(
+            "{} isn't an address on this computer now. Choose another one in Settings > TFTP server.",
+            addr.ip()
+        ),
+        std::io::ErrorKind::PermissionDenied if cfg!(windows) => format!(
+            "Windows wouldn't let Tether use UDP port {port}. Another program may be holding it; close it or choose another port in Settings > TFTP server."
+        ),
+        std::io::ErrorKind::PermissionDenied => format!(
+            "Port {port} needs extra permission on this system. Choose a port above 1023 in Settings > TFTP server, or allow Tether to use low ports (on Linux: sudo setcap cap_net_bind_service=+ep on the Tether program)."
+        ),
+        _ => format!("Couldn't start the TFTP server on {addr}: {e}"),
+    };
+    CmdError::new("TFTP_BIND", msg).with_detail(serde_json::json!({ "os": e.to_string() }))
+}
+
+#[tauri::command]
+fn tftp_status(state: State<AppState>) -> CmdResult<TftpStatus> {
+    tftp_status_of(&state)
+}
+
+#[tauri::command]
+async fn tftp_start(app: tauri::AppHandle, state: State<'_, AppState>) -> CmdResult<TftpStatus> {
+    if state.tftp.lock().is_some() {
+        return tftp_status_of(&state);
+    }
+    let settings = state.store.settings()?;
+    let root = state.store.tftp_dir(&settings);
+    std::fs::create_dir_all(&root).map_err(|e| {
+        CmdError::new("TFTP_FOLDER", format!("Couldn't create the TFTP folder {}: {e}", root.display()))
+    })?;
+    let ip = match settings.tftp_address.trim() {
+        "" => std::net::IpAddr::from([0, 0, 0, 0]),
+        a => a.parse().map_err(|_| {
+            CmdError::new("TFTP_BIND", format!("\"{a}\" isn't an IP address. Fix it in Settings > TFTP server."))
+        })?,
+    };
+    let bind = std::net::SocketAddr::new(ip, settings.tftp_port);
+    let allowed: Option<tftp::AllowList> = settings.tftp_open_tabs_only.then(|| {
+        let app = app.clone();
+        std::sync::Arc::new(move || app.state::<AppState>().manager.hosts()) as tftp::AllowList
+    });
+    let sink_app = app.clone();
+    let sink: tftp::Sink = std::sync::Arc::new(move |t: &tftp::Transfer| {
+        let _ = sink_app.emit("tftp-transfer", t);
+        tftp_log_transfer(&sink_app.state::<AppState>().store, t);
+    });
+    let cfg = tftp::Config { root: root.clone(), bind, allow_overwrite: settings.tftp_allow_overwrite, allowed };
+    let server = tftp::start(cfg, sink).await.map_err(|e| tftp_bind_error(&e, bind))?;
+    tftp_log(&state.store, &format!("server started on {} serving {}", server.local_addr(), root.display()));
+    *state.tftp.lock() = Some(server);
+    let status = tftp_status_of(&state)?;
+    let _ = app.emit("tftp-status", &status);
+    Ok(status)
+}
+
+/// Stops the server; transfers in progress are cancelled and the devices told so.
+#[tauri::command]
+fn tftp_stop(app: tauri::AppHandle, state: State<AppState>) -> CmdResult<TftpStatus> {
+    if state.tftp.lock().take().is_some() {
+        tftp_log(&state.store, "server stopped");
+    }
+    let status = tftp_status_of(&state)?;
+    let _ = app.emit("tftp-status", &status);
+    Ok(status)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     jumplist::set_app_id();
@@ -648,6 +795,7 @@ pub fn run() {
             manager: Manager::default(),
             placement: window::Placement::default(),
             launch: parking_lot::Mutex::new(launch::targets(std::env::args().skip(1))),
+            tftp: parking_lot::Mutex::new(None),
         })
         .setup(|app| {
             if let Some(win) = app.get_webview_window("main") {
@@ -718,6 +866,9 @@ pub fn run() {
             send_break,
             disconnect,
             set_logging,
+            tftp_status,
+            tftp_start,
+            tftp_stop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tether");
