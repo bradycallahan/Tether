@@ -9,8 +9,11 @@ export interface MenuDef {
 }
 
 /**
- * The application menu bar (File, Edit, View…). Click or F10 to open; once a
- * menu is open, hovering or Left/Right moves between menus, like a native one.
+ * The application menu bar (File, Edit, View…). Click, F10 or a tap of Alt to
+ * reach it; once a menu is open, hovering or Left/Right moves between menus,
+ * like a native one. From the keyboard, each menu's first letter is
+ * underlined and opens it (Alt then F for File), the Windows convention.
+ * Alt held with a letter still goes to the device as Meta.
  */
 export class MenuBar {
   readonly el: HTMLElement;
@@ -20,7 +23,12 @@ export class MenuBar {
   constructor(private defs: MenuDef[], private onDone: () => void) {
     this.el = h("nav", { class: "menubar", role: "menubar", "aria-label": "Main menu" });
     defs.forEach((d, i) => {
-      const b = h("button", { type: "button", role: "menuitem", "aria-haspopup": "menu", tabindex: i === 0 ? "0" : "-1" }, d.label);
+      const b = h(
+        "button",
+        { type: "button", role: "menuitem", "aria-haspopup": "menu", "aria-keyshortcuts": `Alt+${d.label[0]}`, tabindex: i === 0 ? "0" : "-1" },
+        h("u", {}, d.label[0]),
+        d.label.slice(1),
+      );
       b.addEventListener("pointerdown", (e) => {
         e.preventDefault();
         if (this.openIndex === i) closeMenus();
@@ -34,17 +42,30 @@ export class MenuBar {
         else if (e.key === "ArrowRight") this.buttons[(i + 1) % this.buttons.length].focus();
         else if (e.key === "ArrowLeft") this.buttons[(i - 1 + this.buttons.length) % this.buttons.length].focus();
         else if (e.key === "Escape") this.onDone();
+        else if (this.accessKey(e.key) >= 0 && !e.ctrlKey && !e.altKey && !e.metaKey) this.open(this.accessKey(e.key), true);
         else return;
         e.preventDefault();
       });
       this.buttons.push(b);
       this.el.append(b);
     });
+    this.el.addEventListener("focusout", (e) => {
+      if (!this.el.contains(e.relatedTarget as Node) && !menuOpen()) this.el.classList.remove("keys");
+    });
   }
 
-  /** Keyboard entry point (F10). */
+  /** Keyboard entry point (F10, or Alt pressed and released). Shows the access keys. */
   focus() {
+    this.el.classList.add("keys");
     this.buttons[0]?.focus();
+  }
+
+  hasFocus(): boolean {
+    return this.el.contains(document.activeElement);
+  }
+
+  private accessKey(key: string): number {
+    return key.length === 1 ? this.defs.findIndex((d) => d.label[0].toLowerCase() === key.toLowerCase()) : -1;
   }
 
   open(i: number, focusFirst: boolean) {
@@ -61,6 +82,7 @@ export class MenuBar {
         if (menuOpen()) return;
         this.openIndex = -1;
         this.buttons.forEach((x) => x.classList.remove("open"));
+        if (!this.hasFocus()) this.el.classList.remove("keys");
         if (this.el.contains(document.activeElement) || document.activeElement === document.body) this.onDone();
       },
     });

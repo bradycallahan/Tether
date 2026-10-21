@@ -125,6 +125,8 @@ button.link:hover { text-decoration: underline; }
   margin: 2px 0;
 }
 .menubar button:hover, .menubar button.open, .menubar button:focus-visible { background: var(--panel-3); outline: none; }
+.menubar u { text-decoration: none; }
+.menubar.keys u { text-decoration: underline; text-underline-offset: 2px; }
 
 .toolbar {
   display: flex; align-items: center; gap: 2px;
@@ -550,6 +552,11 @@ table.ref td:first-child { width: 42%; }
 .menu button .sub { display: grid; color: var(--text-dim); margin-left: 6px; }
 .menu hr { border: 0; border-top: 1px solid var(--rule); margin: 4px 2px; }
 
+/* Windows 11 menus: rounder, roomier rows, a soft shadow. */
+:root[data-platform="windows"] .menu { border-radius: 8px; padding: 4px; box-shadow: 0 8px 16px rgba(0, 0, 0, 0.26); }
+:root[data-platform="windows"] .menu button { min-height: 30px; padding: 0 10px; border-radius: 4px; }
+:root[data-platform="windows"] .menu hr { margin: 4px -4px; }
+
 .toast {
   position: fixed; bottom: 36px; left: 50%; transform: translateX(-50%); z-index: 2000;
   display: flex; align-items: center; gap: 10px; max-width: calc(100vw - 40px);
@@ -581,4 +588,16 @@ table.ref td:first-child { width: 42%; }
   .catnav button { font-size: 0; justify-content: center; padding: 8px; }
   .catnav button .icon { font-size: 13px; }
   .tab { min-width: 92px; }
+}
+
+/* ---------- Windows High Contrast (forced colors) ---------- */
+
+@media (forced-colors: active) {
+  /* The LEDs carry state, so they keep their colors. */
+  .led { forced-color-adjust: none; border: 1px solid CanvasText; }
+  .tree-row.selected, .menu button:focus, .palette li.sel { background: Highlight; color: HighlightText; forced-color-adjust: none; }
+  .tree:focus .tree-row.cursor { outline: 1px solid Highlight; }
+  .tab.active { border-top: 2px solid Highlight; }
+  .btn, .tool, input, select, textarea, .menu, dialog { border: 1px solid ButtonText; }
+  .btn.primary { background: ButtonText; color: ButtonFace; forced-color-adjust: none; }
 }

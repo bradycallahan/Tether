@@ -12,7 +12,7 @@ import { commands, isMac } from "./commands";
 import { h, icon } from "./dom";
 import { confirmDialog, hostKeyDialog, pasteConfirm, promptSecret, promptText, toast } from "./dialogs";
 import { Highlighter } from "./highlight";
-import { showMenu, type MenuEntry } from "./menu";
+import { fromKeyboard, menuPoint, showMenu, type MenuEntry } from "./menu";
 import { scheme } from "./schemes";
 import { store } from "./state";
 import { playSendString } from "./escapes";
@@ -139,7 +139,8 @@ export class Tab {
         },
         oncontextmenu: (e: MouseEvent) => {
           e.preventDefault();
-          host.tabMenu(this, e.clientX, e.clientY);
+          const at = menuPoint(e);
+          host.tabMenu(this, at.x, at.y);
         },
         onkeydown: (e: KeyboardEvent) => {
           if (e.key === "Enter" || e.key === " ") host.activate(this);
@@ -222,7 +223,11 @@ export class Tab {
     );
     this.termEl.addEventListener("contextmenu", (e) => {
       e.preventDefault();
-      if (store.settings.rightClickPaste) {
+      // The Menu key always opens the menu: a keystroke must never paste.
+      if (fromKeyboard(e)) {
+        const at = menuPoint(e);
+        this.terminalMenu(at.x, at.y);
+      } else if (store.settings.rightClickPaste) {
         if (t.hasSelection()) {
           this.copySelection();
           t.clearSelection();

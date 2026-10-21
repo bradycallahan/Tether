@@ -26,6 +26,9 @@ All notable changes to Tether are listed here. The format follows [Keep a Change
 - Tether reopens at the size and place it was closed, maximized if it was; a window left on a monitor that's no longer plugged in opens centered instead
 - The taskbar button flashes when a background tab rings the bell or drops its connection
 - Ctrl+Insert copies and Shift+Insert pastes everywhere, the Windows convention
+- Tap Alt to reach the menu bar, then a menu's underlined letter to open it (Alt, F for File), as in other Windows apps. Alt with a letter still goes to the device as Meta
+- The Menu key and Shift+F10 open the context menu of whatever has focus: the terminal, a tab, a session or folder in the tree. In the terminal the Menu key always opens the menu, even with right-click paste on
+- Windows High Contrast themes: selection and focus use the system colors, and the port LEDs keep their colors
 - A shell picker for local-shell sessions and an "Other shells" menu, listing the shells found on this computer: PowerShell 7, Windows PowerShell, Command Prompt, each WSL distribution and Git Bash on Windows; the shells in /etc/shells elsewhere. Local tabs are named after their shell
 
 ### Fixed
@@ -37,6 +40,7 @@ All notable changes to Tether are listed here. The format follows [Keep a Change
 
 ### Changed
 - Windows: the title bar follows Tether's light or dark theme, scrollbars are the thin Windows 11 overlay kind, and the browser's form suggestions no longer drop down under host and user fields
+- Windows: menus use Windows 11 proportions
 - The window appears once it's drawn, instead of flashing white on launch
 - The installer lists a publisher, copyright and homepage
 - Session options and Settings use a category list instead of tabs, and gained Appearance, Logging and Advanced pages

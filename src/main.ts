@@ -7,7 +7,7 @@ import { clear, h, icon } from "./dom";
 import { alertDialog, confirmDialog, modal, promptText, toast } from "./dialogs";
 import { editButton, editButtonBars, editHighlights, editSession, editSettings, quickConnectDialog, type SessionEditResult, type SettingsPage } from "./editors";
 import { aboutDialog, referenceDialog, shortcutsDialog } from "./help";
-import { cmd, menuOpen, showMenu, type MenuEntry, type MenuItem } from "./menu";
+import { closeMenus, cmd, menuOpen, menuPoint, showMenu, type MenuEntry, type MenuItem } from "./menu";
 import { MenuBar, Toolbar, type MenuDef } from "./menubar";
 import { Omnibox } from "./omnibox";
 import { draggedSessionIds, isSessionDrag, quickSession, Sidebar } from "./sidebar";
@@ -63,6 +63,7 @@ class App {
     store.on("sessions", () => this.refresh());
     matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => this.applyTheme());
     addEventListener("keydown", (e) => this.shortcut(e), true);
+    if (!isMac) this.altTapsMenuBar();
     guardWebview();
     addEventListener("focus", () => this.tabs.active?.tabEl.classList.remove("unread"));
     this.restoreWorkspace();
@@ -464,7 +465,8 @@ class App {
         onpointerdown: (e: Event) => e.preventDefault(),
         oncontextmenu: (e: MouseEvent) => {
           e.preventDefault();
-          this.barMenu(e.clientX, e.clientY, i);
+          const at = menuPoint(e);
+          this.barMenu(at.x, at.y, i);
         },
       }, b.label || b.send);
       if (b.color) btn.style.setProperty("--btn-color", b.color);
@@ -1058,6 +1060,29 @@ class App {
 
   // ---------------------------------------------------------------------------
   // Keyboard
+
+  /**
+   * Pressing and releasing Alt on its own moves to the menu bar (and back),
+   * as in any Windows app. Alt used with another key or a click is Meta for
+   * the device, so it doesn't count.
+   */
+  altTapsMenuBar() {
+    let alone = false;
+    addEventListener("keydown", (e) => {
+      alone = e.key === "Alt" && !e.ctrlKey && !e.shiftKey && !e.metaKey && (alone || !e.repeat);
+    }, true);
+    addEventListener("pointerdown", () => (alone = false), true);
+    addEventListener("blur", () => (alone = false));
+    addEventListener("keyup", (e) => {
+      if (e.key !== "Alt" || !alone) return;
+      alone = false;
+      if (document.querySelector("dialog[open]")) return;
+      e.preventDefault();
+      if (menuOpen()) closeMenus();
+      if (this.menubar.hasFocus()) this.focusTerminal();
+      else this.menubar.focus();
+    }, true);
+  }
 
   shortcut(e: KeyboardEvent) {
     if (document.querySelector("dialog[open]") || menuOpen()) return;

@@ -1,6 +1,6 @@
 import { commands } from "./commands";
 import { clear, h, icon } from "./dom";
-import { showMenu, type MenuEntry, type MenuItem } from "./menu";
+import { fromKeyboard, menuPoint, showMenu, type MenuEntry, type MenuItem } from "./menu";
 import { folderName, isUnder, joinFolder, parentFolder, store } from "./state";
 import type { TabState } from "./tabs";
 import { hostLabel, newSession, PROTOCOL_NAMES, type Protocol, type Session } from "./types";
@@ -81,7 +81,15 @@ export class Sidebar {
     this.tree.addEventListener("contextmenu", (e) => {
       if ((e.target as Element).closest(".tree-row")) return;
       e.preventDefault();
-      this.rootMenu(e.clientX, e.clientY);
+      // The Menu key on the focused tree: open the menu of the row under the cursor.
+      const row = fromKeyboard(e) ? this.tree.querySelector<HTMLElement>(".tree-row.cursor") : null;
+      if (row) {
+        const r = row.getBoundingClientRect();
+        row.dispatchEvent(new MouseEvent("contextmenu", { cancelable: true, button: 2, clientX: r.left + 24, clientY: r.bottom }));
+        return;
+      }
+      const at = menuPoint(e);
+      this.rootMenu(at.x, at.y);
     });
     this.tree.addEventListener("pointerdown", (e) => {
       if (!(e.target as Element).closest(".tree-row")) this.selectOnly(null);
