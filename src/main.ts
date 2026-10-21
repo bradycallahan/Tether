@@ -19,6 +19,7 @@ import { hostLabel, newSession, PROTOCOL_NAMES, type LaunchTarget, type ButtonBa
 import { Welcome } from "./welcome";
 import { guardWebview, setWindowTheme } from "./platform";
 import { offerAtFirstRun, unlockAtStartup } from "./vault";
+import { Tftp } from "./tftp";
 
 const MANY_TABS = 8;
 
@@ -37,6 +38,7 @@ class App {
   cmdInput!: HTMLTextAreaElement;
   cmdTarget!: HTMLButtonElement;
   statusEl!: HTMLElement;
+  tftp = new Tftp(() => void this.openSettings("tftp"));
   uptimeEl: HTMLElement | null = null;
   currentBar: string | null = null;
   history: string[] = [];
@@ -93,6 +95,7 @@ class App {
     listen<LaunchTarget[]>("open-targets", (e) => this.openTargets(e.payload)).catch(() => {});
     this.guardClose();
     store.shells().then((list) => (this.shells = list));
+    void this.tftp.init();
     // The window starts hidden; show it once this first frame has painted.
     requestAnimationFrame(() => requestAnimationFrame(() => api.windowReady().catch(() => {})));
     setTimeout(() => offerAtFirstRun(), 400);
@@ -183,6 +186,9 @@ class App {
       { id: "tools.buttonBars", label: "Button bars…", icon: "buttons", run: () => this.editBars() },
       { id: "tools.highlights", label: "Keyword highlighting…", icon: "highlight", run: () => this.editHl() },
       { id: "tools.dataFolder", label: "Open data folder", run: () => api.openFolder("data") },
+      { id: "tftp.toggle", label: () => (this.tftp.running ? "Stop TFTP server" : "Start TFTP server"), icon: "transfer", detail: "Let devices copy files to and from the TFTP folder", run: () => this.tftp.toggle() },
+      { id: "tftp.details", label: "TFTP server details", detail: "Addresses to use, the folder and recent transfers", run: () => this.tftp.openPanel() },
+      { id: "tftp.folder", label: "Open TFTP folder", run: () => void api.openFolder("tftp").catch(() => {}) },
       { id: "tools.settings", label: "Settings…", icon: "gear", keys: ["Mod+,"], run: () => this.openSettings() },
       // Window
       { id: "tab.next", label: "Next tab", keys: ["Ctrl+Tab", "Ctrl+PageDown"], macKeys: ["Ctrl+Tab", "Meta+Shift+]"], enabled: () => this.tabs.tabs.length > 1, run: () => this.tabs.cycle(1) },
@@ -248,7 +254,11 @@ class App {
       },
       {
         label: "Tools",
-        items: () => [cmd("tools.palette"), "-", cmd("tools.buttonBars"), cmd("tools.highlights"), "-", cmd("tools.dataFolder"), cmd("tools.settings")],
+        items: () => [
+          cmd("tools.palette"), "-",
+          cmd("tftp.toggle"), cmd("tftp.details"), cmd("tftp.folder"), "-",
+          cmd("tools.buttonBars"), cmd("tools.highlights"), "-", cmd("tools.dataFolder"), cmd("tools.settings"),
+        ],
       },
       {
         label: "Window",
@@ -666,7 +676,7 @@ class App {
     this.uptimeEl = null;
     const live = this.tabs.tabs.filter((x) => x.state === "connected").length;
     if (!t) {
-      this.statusEl.append(h("span", { class: "seg" }, `${store.sessions.length} saved session${store.sessions.length === 1 ? "" : "s"}`));
+      this.statusEl.append(h("span", { class: "seg" }, `${store.sessions.length} saved session${store.sessions.length === 1 ? "" : "s"}`), h("span", { class: "grow" }), this.tftp.el);
       this.setWindowTitle("Tether");
       return;
     }
@@ -681,6 +691,7 @@ class App {
         ? h("button", { type: "button", class: "seg warn", title: "Stop broadcasting", onclick: () => this.toggleBroadcast() }, icon("broadcast"), `Broadcasting to ${targets} tab${targets === 1 ? "" : "s"}`)
         : null,
       this.tabs.tabs.length > 1 ? h("span", { class: "seg dim" }, `${live} of ${this.tabs.tabs.length} tabs connected`) : null,
+      this.tftp.el,
       h("button", { type: "button", class: `seg ${t.logPath ? "on" : ""}`, title: t.logPath ?? commands.tip("log.toggle"), disabled: t.state !== "connected", onclick: () => t.toggleLogging() }, icon("log"), t.logPath ? "Logging" : "Not logging"),
       h("span", { class: "seg dim", title: "Columns × rows" }, `${t.term.cols}×${t.term.rows}`),
     ];
@@ -757,13 +768,17 @@ class App {
     getCurrentWindow()
       .onCloseRequested(async (e) => {
         const live = this.tabs.tabs.filter((t) => t.state === "connected").length;
-        if (live) {
+        // A half-copied image leaves a broken file on the device's flash, so say so.
+        const copying = this.tftp.transfers.filter((t) => t.state === "active").length;
+        if (live || copying) {
           e.preventDefault();
           const verb = isMac ? "Quit" : "Exit";
           const they = live === 1 ? "It'll" : "They'll";
+          const tabs = live ? (store.settings.restoreWorkspace ? `${they} be disconnected now and reopened next time Tether starts.` : `${they} be disconnected.`) : "";
+          const tftp = copying ? `${copying === 1 ? "A TFTP transfer is" : `${copying} TFTP transfers are`} still running and will be cancelled.` : "";
           const ok = await confirmDialog({
-            title: `${verb} with ${live} connected tab${live === 1 ? "" : "s"}?`,
-            message: store.settings.restoreWorkspace ? `${they} be disconnected now and reopened next time Tether starts.` : `${they} be disconnected.`,
+            title: live ? `${verb} with ${live} connected tab${live === 1 ? "" : "s"}?` : `${verb} during a TFTP transfer?`,
+            message: [tabs, tftp].filter(Boolean).join(" "),
             confirm: verb,
           });
           if (!ok) return;

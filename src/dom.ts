@@ -89,5 +89,6 @@ export const ICONS = {
   eraser: `<path ${S} d="M6 13.5h7.5M3.2 9.8l5.6-5.6a1.4 1.4 0 012 0l2 2a1.4 1.4 0 010 2l-5.4 5.3H5.3z"/>`,
   palette: `<path ${S} d="M8 2a6 6 0 100 12c.9 0 1.3-.7.9-1.5-.4-.9.2-1.7 1.1-1.7H12a2 2 0 002-2.1C13.9 5 11.3 2 8 2z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M5.2 7.2h.01M7.3 4.9h.01M10.3 5.3h.01"/>`,
   buttons: `<path ${S} d="M1.5 5.5h3.6v5H1.5zM6.2 5.5h3.6v5H6.2zM10.9 5.5h3.6v5h-3.6z"/>`,
+  transfer: `<path ${S} d="M5 2.5v10M2.5 10L5 12.5 7.5 10M11 13.5v-10M8.5 6L11 3.5 13.5 6"/>`,
   highlight: `<path ${S} d="M2.5 13.5h11M5 11l1-3 5-5 2 2-5 5z"/>`,
 };

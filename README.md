@@ -36,6 +36,9 @@ Tether covers the SecureCRT features people actually use day to day — saved se
 - Command bar with history for composing a line before sending it
 - Login scripts: commands sent automatically after connecting
 
+**File transfer**
+- Built-in TFTP server (Tools > Start TFTP server) for `copy tftp: flash:` and config backups. It shows the addresses to give the device, a transfer log with progress, and writes `tftp.log`. Received files never overwrite existing ones unless you allow it, and it can be limited to devices you have a tab open to. Supports the blksize, tsize and timeout options and files over 32 MB
+
 **Terminal**
 - xterm.js with GPU rendering, 256/true color, Unicode 11, clickable links (Ctrl+click)
 - Keyword highlighting that colors matches as they arrive without altering the stream — colored prompts and logs stay intact. Ships with a "Network gear" set for interface names, up/down states, syslog severities, IPs and MACs
@@ -105,7 +108,7 @@ On Windows that produces an `.msi` and an NSIS `.exe` installer; on macOS a `.dm
 
 ```sh
 npm test                                  # quick connect, send strings, shortcuts, session ranking
-cd src-tauri && cargo test                # storage, logging, telnet, login actions, importer, raw TCP
+cd src-tauri && cargo test                # storage, logging, telnet, login actions, importer, raw TCP, TFTP
 npm run preview:ui                        # the UI in a browser with a fake backend (no Rust build needed)
 ```
 

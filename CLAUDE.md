@@ -56,6 +56,7 @@ src/                     UI — TypeScript, Vite, no framework
   help.ts                Keyboard shortcuts sheet (generated from the registry), quick reference, about
   dialogs.ts             modal(), confirm/prompt/host-key/paste dialogs, toasts (with optional Undo-style action)
   highlight.ts           Keyword highlighting via xterm decorations (never alters the stream)
+  tftp.ts                TFTP server status-strip segment, details panel (addresses, folder, transfers), start/stop
   quickconnect.ts        Parses typed targets (admin@host:22, COM3 9600, telnet ts 2003) and ranks saved sessions
   escapes.ts             Send-string escapes for buttons/command window (\r \p ^C \xHH) — mirrored in expect.rs
   schemes.ts             Terminal color schemes
@@ -71,6 +72,7 @@ src-tauri/src/           Backend — Rust, Tauri 2
   telnet.rs              Telnet state machine (pure, unit tested) + raw TCP transport
   serial.rs              serialport transport, port listing, break
   local.rs               portable-pty local shells
+  tftp.rs                Built-in TFTP server: pure packet/option/path/netascii logic + per-transfer UDP tasks
   store.rs               On-disk library: one TOML per session, settings, bars, highlights, folders, workspace, defaults
   secrets.rs             OS keychain via `keyring` (password, passphrase, enable)
   logger.rs              Session logs (raw or ANSI-stripped, timestamps, templates)
@@ -180,7 +182,8 @@ Keep this current: it's how the next worker knows where things stand. Newest fir
 
 - **2026-10-21 — TFTP server, in progress (branch `claude/project-thread-4qkfnk`).** Roadmap item 6, SecureCRT-style built-in server (Tools menu + status strip, not tied to a tab). SCP is handled by the SFTP thread (fallback in the Files pane).
   - **Done:** `tftp.rs` — RFC 1350 + blksize/tsize/timeout (2347–2349), octet and netascii, block-number wrap past 65535, per-transfer socket (TID), stray TIDs get error 5, retransmit on silence (3 s × 5, or the client's timeout), duplicate acks ignored, final-ack dally on writes, duplicate requests ignored. Writes go to `<name>.tftp-part` and are renamed when complete (removed on failure); never overwrite unless `tftpAllowOverwrite`. Names are checked (`relative_path`: no `..`, drive letters, ADS, reserved device names, trailing dot/space) and resolved with canonicalize so links can't leave the folder. Optional "only devices with an open tab" (`tftpOpenTabsOnly`, resolves tab host names; off by default because serial-console users have no tab with the device's IP). `lib.rs`: `tftp_status/start/stop`, `open_folder("tftp")`, events `tftp-status` and `tftp-transfer`, `tftp.log` in the log folder, plain bind errors (`TFTP_BIND`). Settings: `tftpFolder` (default `<data>/tftp`), `tftpAddress`, `tftpPort` (69), `tftpAllowOverwrite`, `tftpOpenTabsOnly`, `tftpStartWithApp`. New crate `if-addrs` (tiny; deps already in tree) lists the PC's addresses. Tests: unit tests in `tftp.rs`, end-to-end in `tests/tftp.rs`; also checked by hand against tftp-hpa, atftp and curl (get/put, options, ascii, exists).
-  - **Next:** UI (`src/tftp.ts`: status-strip segment + popover with addresses/transfers, Tools menu commands, Settings > TFTP server page), preview fakes, CHANGELOG/ROADMAP, PR, then ATLAS test (Windows Firewall prompt on first start; WSL Fedora as client).
+  - **UI done:** `src/tftp.ts` (`Tftp` class owned by `App`): status-strip segment only while running (green LED + address; amber LED + "TFTP 42% sending file" during transfers), click for a panel (every IPv4 address with Copy, a `copy tftp://…` hint, folder + Open, last 12 transfers with progress bars, Start/Stop, Settings…). Tools menu: Start/Stop TFTP server (dynamic label), TFTP server details, Open TFTP folder. Settings > TFTP server page. Toast on each finished transfer (not while the panel is open or while stopping). Changing TFTP settings restarts a running server unless a transfer is active. Quitting during a transfer asks first. Preview: `?tftp` auto-starts and plays three fake transfers (`preview/event.ts` now delivers events). Vitest: `tests/tftp.test.ts`.
+  - **Next:** run the real app under Xvfb with a TFTP client, open the PR, then ATLAS test (Windows Firewall prompt on first start — warn Brady; WSL Fedora as client; check a big file and the Copy buttons).
 - **2026-10-21 — Release 0.3.0.** PR #1 (Windows polish) merged. PR #2 bumps the version to 0.3.0 (the app still said 0.1.0: v0.2.0 was tagged without running `bump-version.mjs`) and splits the changelog into 0.2.0/0.3.0. Brady approved tagging `v0.3.0` on main once #2 is merged; the Build workflow then makes a draft release he publishes. An old untagged v0.1.0 draft is still on the Releases page. Unfinished "tab went quiet" mark (SecureCRT's inactivity state) saved as project file `patches/quiet-tabs-wip.patch`; the coordinator picks the next feature.
 - **2026-10-21 — Windows polish, in progress (branch `claude/project-thread-ky4ci3`, PR #1).** Owner's priority: Windows first, deep native feel; macOS/Linux must keep building but get their own polish later. Plan and SecureCRT feature map: https://claude.ai/artifact/79docbmL8eW2TvsjxJwEk7. SecureCRT walkthrough notes: project file `notes/securecrt-review.md`.
   - **Done on the branch:** `dragDropEnabled: false` (HTML5 DnD was dead on Windows); WebView2 browser accelerators off in release (`window.rs`) plus a JS guard (`platform.ts`); engine context menu suppressed outside text fields; file drops can't navigate; window placement in `window.toml` with off-screen protection; hidden-until-painted start (`window_ready` command, 4 s fallback); title bar follows theme (`setTheme`); Fluent overlay scrollbars (custom scrollbar CSS scoped to non-Windows via `data-platform`); autofill off; taskbar flash on bell/drop; Ctrl+Insert/Shift+Insert; installer metadata; local shell picker (`list_shells`: pwsh, powershell, cmd, WSL distros, Git Bash; quoted command lines); Alt-tap to menu bar with access keys (Alt+letter stays Meta); Menu key / Shift+F10 context menus (never paste in the terminal); Windows 11 menu proportions; forced-colors pass. Linux: clippy, tests, tsc, vitest all pass; preview checked with a Windows UA.
@@ -216,7 +219,7 @@ Work the roadmap in this order unless the owner says otherwise. Each item should
 3. **SFTP pane** for SSH tabs with drag-and-drop upload/download.
 4. **Port forwarding** (local, remote, dynamic/SOCKS) per session.
 5. **SSH agent** support (Windows OpenSSH agent / Pageant, ssh-agent) and agent forwarding.
-6. **Built-in TFTP server** in the status strip for IOS images and config backups.
+6. ~~Built-in TFTP server~~ — built (see Status); verify against real gear.
 7. **Xmodem/Ymodem** over serial for ROMMON recovery.
 8. **Split panes** (resizable, beyond the tile grid).
 9. **Auto-update** via the Tauri updater plugin, signed, fed from GitHub Releases.

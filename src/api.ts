@@ -1,5 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
-import type { ButtonBar, HighlightSet, ImportReport, LaunchTarget, PortInfo, SecretKind, Session, Settings, ShellInfo, StatusEvent, Workspace } from "./types";
+import type { ButtonBar, HighlightSet, ImportReport, LaunchTarget, PortInfo, SecretKind, Session, Settings, ShellInfo, StatusEvent, TftpStatus, Workspace } from "./types";
 
 export const api = {
   listSessions: () => invoke<Session[]>("list_sessions"),
@@ -35,7 +35,7 @@ export const api = {
   listSerialPorts: () => invoke<PortInfo[]>("list_serial_ports"),
   defaultShell: () => invoke<string>("default_shell"),
   listShells: () => invoke<ShellInfo[]>("list_shells"),
-  openFolder: (which: "logs" | "data") => invoke<void>("open_folder", { which }),
+  openFolder: (which: "logs" | "data" | "tftp") => invoke<void>("open_folder", { which }),
   dataDir: () => invoke<string>("data_dir"),
   windowReady: () => invoke<void>("window_ready"),
   setTitleBarColors: (caption: string, text: string) => invoke<void>("set_title_bar_colors", { caption, text }),
@@ -69,6 +69,9 @@ export const api = {
   sendBreak: (connId: string) => invoke<boolean>("send_break", { connId }),
   disconnect: (connId: string) => invoke<void>("disconnect", { connId }),
   setLogging: (connId: string, enabled: boolean) => invoke<string | null>("set_logging", { connId, enabled }),
+  tftpStatus: () => invoke<TftpStatus>("tftp_status"),
+  tftpStart: () => invoke<TftpStatus>("tftp_start"),
+  tftpStop: () => invoke<TftpStatus>("tftp_stop"),
 };
 
 function fromBase64(b64: string): Uint8Array {
