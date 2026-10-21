@@ -6,13 +6,16 @@
 //!   TETHER_TEST_SSH=127.0.0.1:2222 TETHER_TEST_USER=tethertest \
 //!   TETHER_TEST_PASS=... TETHER_TEST_KEY=/path/id TETHER_TEST_KEYPASS=... \
 //!   cargo test -- --ignored
+//!
+//! `TETHER_TEST_SSH_NOSFTP=127.0.0.1:2223` (the same account on a server
+//! without an sftp Subsystem line) also checks how a refusal reads.
 
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Duration;
 use tether_lib::conn::{CmdError, Ctl, Output, StatusEvent};
 use tether_lib::model::SshAuth;
-use tether_lib::{ssh, telnet};
+use tether_lib::{sftp, ssh, telnet};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
@@ -105,6 +108,38 @@ async fn run(
     };
     ssh::start(params, cap.output(), rx).await?;
     Ok((cap, tx))
+}
+
+/// Trust the server's key and connect with the test password.
+async fn link(addr: &str, known_hosts: &std::path::Path) -> ssh::Link {
+    let mut t = target(SshAuth::Password, Some(env("TETHER_TEST_PASS")), None);
+    let (host, port) = addr.rsplit_once(':').unwrap();
+    t.host = host.into();
+    t.port = port.parse().unwrap();
+    let params = |t: ssh::Target| ssh::Params {
+        target: t,
+        jump: None,
+        term: "xterm".into(),
+        cols: 80,
+        rows: 24,
+        known_hosts: known_hosts.to_path_buf(),
+    };
+    let cap = Captured::default();
+    let (_tx, rx) = mpsc::unbounded_channel();
+    if let Err(e) = ssh::start(params(t.clone()), cap.output(), rx).await {
+        let d = e.detail.unwrap();
+        ssh::trust(
+            known_hosts,
+            d["host"].as_str().unwrap(),
+            d["port"].as_u64().unwrap() as u16,
+            d["key"].as_str().unwrap(),
+            false,
+        )
+        .unwrap();
+    }
+    let (tx, rx) = mpsc::unbounded_channel();
+    std::mem::forget(tx); // keep the shell (and so the connection) open
+    ssh::start(params(t), cap.output(), rx).await.unwrap()
 }
 
 fn temp_known_hosts() -> std::path::PathBuf {
@@ -205,4 +240,118 @@ async fn ssh_many_tiny_writes_arrive_in_order() {
         );
         assert!(b.wait_for(&format!("order-{round}-ok\r\n$")).await, "b round {round}: {:?}", b.text());
     }
+}
+
+#[tokio::test]
+#[ignore]
+async fn ssh_sftp_browse_and_transfer() {
+    let kh = temp_known_hosts();
+    let files = sftp::Manager::default();
+    files.attach("tab", link(&env("TETHER_TEST_SSH"), &kh).await, "testhost");
+
+    let home = files.open("tab").await.unwrap();
+    assert!(home.starts_with('/'), "{home}");
+    let root = sftp::join(&home, &format!("tether-sftp-{}", uuid::Uuid::new_v4()));
+    files.mkdir("tab", &root).await.unwrap();
+    assert_eq!(
+        files.mkdir("tab", &root).await.unwrap_err().message,
+        format!("Couldn't create {root}: the device refused.")
+    );
+
+    // A local folder with a nested file and a file big enough to take many packets.
+    let local = std::env::temp_dir().join(format!("tether-sftp-local-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(local.join("configs/old")).unwrap();
+    let big: Vec<u8> = (0..3_000_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    std::fs::write(local.join("configs/image.bin"), &big).unwrap();
+    std::fs::write(local.join("configs/old/run.cfg"), b"hostname sw1\n").unwrap();
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let s2 = seen.clone();
+    let sum =
+        files.upload("tab", "u1", &local.join("configs"), &root, false, move |p| s2.lock().push(p)).await.unwrap();
+    assert_eq!(sum.files, 2);
+    let last = seen.lock().last().cloned().unwrap();
+    assert_eq!((last.done, last.total), (3_000_013, 3_000_013));
+
+    // Uploading again asks before replacing.
+    let again = files.upload("tab", "u2", &local.join("configs"), &root, false, |_| {}).await.unwrap_err();
+    assert_eq!(again.code, "EXISTS");
+
+    let list = files.list("tab", &sftp::join(&root, "configs")).await.unwrap();
+    let image = list.iter().find(|e| e.name == "image.bin").unwrap();
+    assert_eq!((image.kind, image.size), ("file", 3_000_000));
+    assert_eq!(list.iter().find(|e| e.name == "old").unwrap().kind, "dir");
+
+    // Download the folder back and compare.
+    let back = local.join("back");
+    let sum = files.download("tab", "d1", &sftp::join(&root, "configs"), &back, false, |_| {}).await.unwrap();
+    assert_eq!(sum.files, 2);
+    assert_eq!(std::fs::read(back.join("image.bin")).unwrap(), big);
+    assert_eq!(std::fs::read(back.join("old/run.cfg")).unwrap(), b"hostname sw1\n");
+    assert!(!back.join("image.bin.part").exists());
+    let again = files.download("tab", "d2", &sftp::join(&root, "configs"), &back, false, |_| {}).await.unwrap_err();
+    assert_eq!(again.code, "EXISTS");
+
+    // A file streamed from the webview, into a folder that doesn't exist yet.
+    let dropped = sftp::join(&root, "dropped/notes.txt");
+    files.stream_begin("tab", "s1", &dropped, false).await.unwrap();
+    files.stream_chunk("s1", b"first ").await.unwrap();
+    files.stream_chunk("s1", b"second").await.unwrap();
+    files.stream_end("s1", true).await.unwrap();
+    let got = local.join("notes.txt");
+    files.download("tab", "d3", &dropped, &got, false, |_| {}).await.unwrap();
+    assert_eq!(std::fs::read(&got).unwrap(), b"first second");
+
+    // An abandoned stream leaves nothing behind.
+    let abandoned = sftp::join(&root, "dropped/half.bin");
+    files.stream_begin("tab", "s2", &abandoned, false).await.unwrap();
+    files.stream_chunk("s2", &[1, 2, 3]).await.unwrap();
+    files.stream_end("s2", false).await.unwrap();
+    let names: Vec<String> =
+        files.list("tab", &sftp::join(&root, "dropped")).await.unwrap().into_iter().map(|e| e.name).collect();
+    assert_eq!(names, ["notes.txt"]);
+
+    // Rename refuses to clobber, then works.
+    let renamed = sftp::join(&root, "dropped/renamed.txt");
+    files.stream_begin("tab", "s3", &renamed, false).await.unwrap();
+    files.stream_end("s3", true).await.unwrap();
+    assert_eq!(files.rename("tab", &dropped, &renamed).await.unwrap_err().code, "EXISTS");
+    files.remove("tab", &renamed).await.unwrap();
+    files.rename("tab", &dropped, &renamed).await.unwrap();
+
+    // Cancelling a download removes the partial file.
+    let files = Arc::new(files);
+    let f2 = files.clone();
+    let big_remote = sftp::join(&root, "configs/image.bin");
+    let partial = local.join("cancelled.bin");
+    let p2 = partial.clone();
+    let task = tokio::spawn(async move { f2.download("tab", "d4", &big_remote, &p2, false, |_| {}).await });
+    files.cancel("d4");
+    let r = task.await.unwrap();
+    if let Err(e) = r {
+        assert_eq!(e.code, "CANCELLED");
+        assert!(!partial.exists() && !local.join("cancelled.bin.part").exists());
+    }
+
+    // Errors read plainly.
+    let missing = files.list("tab", "/no/such/folder").await.unwrap_err();
+    assert_eq!(missing.message, "Couldn't open /no/such/folder: it doesn't exist.");
+
+    files.remove("tab", &root).await.unwrap();
+    assert!(files.list("tab", &root).await.is_err());
+    files.detach("tab");
+    assert_eq!(files.open("tab").await.unwrap_err().code, "NOT_CONNECTED");
+    let _ = std::fs::remove_dir_all(&local);
+}
+
+#[tokio::test]
+#[ignore]
+async fn ssh_sftp_refused_reads_plainly() {
+    let Ok(addr) = std::env::var("TETHER_TEST_SSH_NOSFTP") else { return };
+    let kh = temp_known_hosts();
+    let files = sftp::Manager::default();
+    files.attach("tab", link(&addr, &kh).await, "core-sw1");
+    let e = files.open("tab").await.unwrap_err();
+    assert_eq!(e.code, "SFTP_REFUSED");
+    assert!(e.message.starts_with("core-sw1 doesn't offer SFTP."), "{}", e.message);
 }
