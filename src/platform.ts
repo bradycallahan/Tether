@@ -3,6 +3,7 @@
 // taskbar/dock nudge when something needs attention.
 
 import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
+import { api } from "./api";
 import type { KeyLike } from "./commands";
 
 export type Platform = "windows" | "mac" | "linux";
@@ -68,4 +69,12 @@ export function requestAttention() {
 /** Keep the native title bar in step with Tether's own theme. */
 export function setWindowTheme(theme: "light" | "dark" | null) {
   getCurrentWindow().setTheme(theme).catch(() => {});
+  // Windows 11 paints the caption its own grey; match it to the menu bar so the
+  // title bar and the app read as one panel. Older Windows ignores this.
+  if (platform === "windows") {
+    const css = getComputedStyle(document.documentElement);
+    const caption = css.getPropertyValue("--rack").trim();
+    const text = css.getPropertyValue("--text").trim();
+    if (caption && text) api.setTitleBarColors(caption, text).catch(() => {});
+  }
 }

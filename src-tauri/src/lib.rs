@@ -197,6 +197,11 @@ fn window_ready(win: tauri::WebviewWindow, state: State<AppState>) {
 }
 
 #[tauri::command]
+fn set_title_bar_colors(win: tauri::WebviewWindow, caption: String, text: String) {
+    window::set_title_bar_colors(&win, &caption, &text);
+}
+
+#[tauri::command]
 fn trust_host_key(state: State<AppState>, host: String, port: u16, key: String, replace: bool) -> CmdResult<()> {
     Ok(ssh::trust(&state.store.known_hosts_path(), &host, port, &key, replace)?)
 }
@@ -517,6 +522,7 @@ pub fn run() {
             open_folder,
             data_dir,
             window_ready,
+            set_title_bar_colors,
             trust_host_key,
             connect,
             write,

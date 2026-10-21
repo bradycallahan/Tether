@@ -27,6 +27,7 @@ export const api = {
   openFolder: (which: "logs" | "data") => invoke<void>("open_folder", { which }),
   dataDir: () => invoke<string>("data_dir"),
   windowReady: () => invoke<void>("window_ready"),
+  setTitleBarColors: (caption: string, text: string) => invoke<void>("set_title_bar_colors", { caption, text }),
   trustHostKey: (host: string, port: number, key: string, replace: boolean) =>
     invoke<void>("trust_host_key", { host, port, key, replace }),
 

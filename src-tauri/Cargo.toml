@@ -40,6 +40,7 @@ log = "0.4"
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.39"
 windows-core = "0.62"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
 
 # Small, fast-starting release builds. The terminal's heavy lifting happens in
 # the webview, so optimizing the Rust side for size costs nothing noticeable.

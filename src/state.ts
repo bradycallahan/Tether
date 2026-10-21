@@ -109,7 +109,11 @@ class Store {
 
   async moveSessions(ids: string[], folder: string) {
     const set = new Set(ids);
-    await this.saveSessions(this.sessions.filter((s) => set.has(s.id) && s.folder !== folder).map((s) => ({ ...s, folder })));
+    const moving = this.sessions.filter((s) => set.has(s.id) && s.folder !== folder);
+    // A folder the last session was dragged out of stays, as an empty folder.
+    const emptied = [...new Set(moving.map((s) => s.folder))].filter((f) => f && !this.sessions.some((s) => s.folder === f && !set.has(s.id)));
+    await this.saveSessions(moving.map((s) => ({ ...s, folder })));
+    if (emptied.some((f) => !this.explicitFolders.includes(f))) await this.setFolders([...this.explicitFolders, ...emptied]);
   }
 
   private async setFolders(list: string[]) {

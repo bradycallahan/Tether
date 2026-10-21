@@ -34,9 +34,13 @@ All notable changes to Tether are listed here. The format follows [Keep a Change
 - Ctrl+F4 closes the tab, as in other Windows apps
 - The command window takes several lines: Ctrl+Enter adds a line, and each line is sent with its own Enter
 - View > Always on top
+- Windows 11: the title bar takes the app's own chrome color in both themes, so it no longer looks like a separate strip
 - A shell picker for local-shell sessions and an "Other shells" menu, listing the shells found on this computer: PowerShell 7, Windows PowerShell, Command Prompt, each WSL distribution and Git Bash on Windows; the shells in /etc/shells elsewhere. Local tabs are named after their shell
 
 ### Fixed
+- Closing Tether while maximized no longer makes the maximized size its normal size; un-maximizing after a restart goes back to the size you had
+- Dragging the last session out of a folder no longer makes the folder disappear
+- At narrow window sizes the session manager gives up width so the terminal stays usable
 - Windows: dragging sessions between folders, reordering tabs and dragging a session onto the tab area work (they did nothing before)
 - Windows: F5, Ctrl+R and other browser keys no longer reload the window, which dropped every connection; Ctrl+P, Ctrl+F and F7 no longer open browser features
 - Right-clicking anywhere without a menu of its own no longer shows the web engine's Back/Reload/Print menu

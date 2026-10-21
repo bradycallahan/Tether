@@ -64,7 +64,8 @@ code { font: 12px var(--font-mono); padding: 0 3px; border-radius: 3px; backgrou
 
 #app {
   display: grid;
-  grid-template-columns: var(--sidebar-w, 260px) 4px minmax(0, 1fr);
+  /* The session manager gives way on narrow windows so the terminal keeps its columns. */
+  grid-template-columns: min(var(--sidebar-w, 260px), max(180px, 100vw - 560px)) 4px minmax(0, 1fr);
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   height: 100vh;
 }

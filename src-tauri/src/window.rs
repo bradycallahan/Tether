@@ -5,6 +5,9 @@
 use crate::model::WindowPlacement;
 use crate::store::Store;
 use parking_lot::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 use tauri::{LogicalSize, PhysicalPosition, Runtime, WebviewWindow, WindowEvent};
 
 /// A monitor's work area in physical pixels.
@@ -36,8 +39,20 @@ pub fn fit(p: &WindowPlacement, areas: &[Area], scale: f64) -> Option<WindowPlac
 
 /// The window's last un-maximized bounds, kept up to date as it moves so the
 /// saved placement is the one the user arranged, not the maximized one.
+#[derive(Default, Clone)]
+pub struct Placement(Arc<Tracked>);
+
 #[derive(Default)]
-pub struct Placement(Mutex<Option<WindowPlacement>>);
+pub struct Tracked {
+    normal: Mutex<Option<WindowPlacement>>,
+    /// Bumped on every move or resize; a settled reading only counts if no newer event came after it.
+    generation: AtomicU64,
+}
+
+/// Windows reports the moves and resizes of a maximize (and of a snap) before
+/// the window says it's maximized, so the bounds are only read once they've
+/// settled for this long.
+const SETTLE: Duration = Duration::from_millis(400);
 
 const MIN_W: f64 = 720.0;
 const MIN_H: f64 = 420.0;
@@ -68,7 +83,7 @@ pub fn restore<R: Runtime>(win: &WebviewWindow<R>, store: &Store, placement: &Pl
     let Some(p) = fit(&saved, &areas, scale) else { return };
     let _ = win.set_position(PhysicalPosition::new(p.x, p.y));
     let _ = win.set_size(LogicalSize::new(p.width, p.height));
-    *placement.0.lock() = Some(p);
+    *placement.0.normal.lock() = Some(p);
 }
 
 /// Shows the window once the UI has painted its first frame.
@@ -76,39 +91,91 @@ pub fn show<R: Runtime>(win: &WebviewWindow<R>, placement: &Placement) {
     if win.is_visible().unwrap_or(true) {
         return;
     }
-    if placement.0.lock().as_ref().is_some_and(|p| p.maximized) {
+    if placement.0.normal.lock().as_ref().is_some_and(|p| p.maximized) {
         let _ = win.maximize();
     }
     let _ = win.show();
     let _ = win.set_focus();
 }
 
+/// The window's bounds if it's in its normal state (not maximized, minimized,
+/// full screen or hidden).
+fn normal_bounds<R: Runtime>(win: &WebviewWindow<R>) -> Option<WindowPlacement> {
+    let busy = win.is_maximized().unwrap_or(true)
+        || win.is_minimized().unwrap_or(true)
+        || win.is_fullscreen().unwrap_or(true)
+        || !win.is_visible().unwrap_or(false);
+    if busy {
+        return None;
+    }
+    let (Ok(pos), Ok(size), Ok(scale)) = (win.outer_position(), win.inner_size(), win.scale_factor()) else {
+        return None;
+    };
+    let size = size.to_logical::<f64>(scale);
+    Some(WindowPlacement { x: pos.x, y: pos.y, width: size.width, height: size.height, maximized: false })
+}
+
 /// Tracks moves and resizes, and saves the placement when the window closes.
 pub fn on_event<R: Runtime>(win: &WebviewWindow<R>, event: &WindowEvent, store: &Store, placement: &Placement) {
     match event {
         WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
-            let busy = win.is_maximized().unwrap_or(true)
-                || win.is_minimized().unwrap_or(true)
-                || win.is_fullscreen().unwrap_or(true)
-                || !win.is_visible().unwrap_or(false);
-            if busy {
-                return;
-            }
-            let (Ok(pos), Ok(size), Ok(scale)) = (win.outer_position(), win.inner_size(), win.scale_factor()) else {
-                return;
-            };
-            let size = size.to_logical::<f64>(scale);
-            *placement.0.lock() =
-                Some(WindowPlacement { x: pos.x, y: pos.y, width: size.width, height: size.height, maximized: false });
+            let generation = placement.0.generation.fetch_add(1, Ordering::SeqCst) + 1;
+            let (win, tracked) = (win.clone(), placement.0.clone());
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(SETTLE).await;
+                if tracked.generation.load(Ordering::SeqCst) != generation {
+                    return;
+                }
+                if let Some(p) = normal_bounds(&win) {
+                    *tracked.normal.lock() = Some(p);
+                }
+            });
         }
         WindowEvent::CloseRequested { .. } => {
-            let Some(mut p) = placement.0.lock().clone() else { return };
-            p.maximized = win.is_maximized().unwrap_or(false);
+            let maximized = win.is_maximized().unwrap_or(false);
+            let current = if maximized { None } else { normal_bounds(win) };
+            let Some(mut p) = current.or_else(|| placement.0.normal.lock().clone()) else { return };
+            p.maximized = maximized;
             if let Err(e) = store.save_window_placement(&p) {
                 log::warn!("couldn't save the window placement: {e:#}");
             }
         }
         _ => {}
+    }
+}
+
+/// "#1b2026" as a Windows COLORREF (0x00BBGGRR).
+pub fn colorref(hex: &str) -> Option<u32> {
+    let hex = hex.trim().strip_prefix('#')?;
+    if hex.len() != 6 {
+        return None;
+    }
+    let v = u32::from_str_radix(hex, 16).ok()?;
+    let (r, g, b) = (v >> 16, (v >> 8) & 0xff, v & 0xff);
+    Some(b << 16 | g << 8 | r)
+}
+
+/// Windows 11 lets an app color its title bar. Painting it in Tether's own
+/// chrome color removes the seam between the system caption and the menu bar.
+/// Earlier Windows versions ignore the request; other platforms have nothing to do.
+#[cfg_attr(not(windows), allow(unused_variables))]
+pub fn set_title_bar_colors<R: Runtime>(win: &WebviewWindow<R>, caption: &str, text: &str) {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR};
+        let Ok(hwnd) = win.hwnd() else { return };
+        for (attr, color) in [(DWMWA_CAPTION_COLOR, colorref(caption)), (DWMWA_TEXT_COLOR, colorref(text))] {
+            let Some(c) = color else { continue };
+            // SAFETY: a valid window handle and a pointer to a live u32 of the size given.
+            let _ = unsafe {
+                DwmSetWindowAttribute(
+                    windows::Win32::Foundation::HWND(hwnd.0),
+                    attr,
+                    &c as *const u32 as *const _,
+                    std::mem::size_of::<u32>() as u32,
+                )
+            };
+        }
     }
 }
 
@@ -164,6 +231,14 @@ mod tests {
     fn forgets_a_window_whose_title_bar_is_off_screen() {
         assert_eq!(fit(&placed(100, -400, 1280.0, 800.0), &[LAPTOP], 1.0), None);
         assert_eq!(fit(&placed(1900, 100, 1280.0, 800.0), &[LAPTOP], 1.0), None);
+    }
+
+    #[test]
+    fn converts_css_colors_to_colorref() {
+        assert_eq!(colorref("#171b20"), Some(0x00201b17));
+        assert_eq!(colorref(" #FFFFFF "), Some(0x00ffffff));
+        assert_eq!(colorref("rgb(1,2,3)"), None);
+        assert_eq!(colorref("#fff"), None);
     }
 
     #[test]
