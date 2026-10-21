@@ -269,6 +269,8 @@ pub struct Settings {
     pub show_status_bar: bool,
     /// The master passphrase has been offered (once, at first run).
     pub vault_offered: bool,
+    /// Mark a background tab whose busy output has stopped for this long; 0 = off.
+    pub quiet_tab_secs: u32,
 }
 
 impl Default for Settings {
@@ -302,6 +304,7 @@ impl Default for Settings {
             show_sidebar: true,
             show_status_bar: true,
             vault_offered: false,
+            quiet_tab_secs: 10,
         }
     }
 }
@@ -430,5 +433,12 @@ mod tests {
         let json = serde_json::to_value(&w).unwrap();
         assert!(json["tabs"].is_array() && json["recent"].is_array());
         assert!(json["tabs"][0]["inBroadcast"].is_boolean());
+    }
+
+    #[test]
+    fn older_settings_get_the_quiet_tab_default() {
+        let s: Settings = toml::from_str("fontSize = 15\n").unwrap();
+        assert_eq!((s.font_size, s.quiet_tab_secs), (15, 10));
+        assert!(serde_json::to_value(&s).unwrap()["quietTabSecs"].is_u64());
     }
 }

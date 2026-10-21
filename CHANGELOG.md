@@ -4,6 +4,10 @@ All notable changes to Tether are listed here. The format follows [Keep a Change
 
 ## Unreleased
 
+### Added
+- A tab you aren't looking at turns its port LED blue the moment new output arrives (SecureCRT's "new output" state), and back to green when you look at it
+- Background tabs that were busy (a copy, a long show, a ping) get a tick once their output stops, with the time it stopped in the tab's tooltip; set the delay or turn it off in Settings > Terminal
+
 ## 0.3.0 — 2026-10-21
 
 ### Added

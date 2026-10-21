@@ -260,6 +260,10 @@ button.link:hover { text-decoration: underline; }
 .tab:hover .x, .tab.active .x { opacity: 0.7; }
 .tab .x:hover { opacity: 1; background: var(--panel-3); }
 .tab.unread .title { color: var(--text); font-weight: 600; }
+/* Went quiet after being busy in the background (see Tab.watchQuiet). */
+.tab .quiet-mark { display: none; flex: none; color: var(--text); }
+.tab .quiet-mark .icon { width: 12px; height: 12px; }
+.tab.quiet .quiet-mark { display: grid; }
 .tab.dragging { opacity: 0.4; }
 .tab .bc {
   display: none; width: 15px; height: 15px; border-radius: 3px; place-items: center;
@@ -277,6 +281,8 @@ button.link:hover { text-decoration: underline; }
 .led.connecting { background: var(--activity); animation: blink 900ms steps(2, jump-none) infinite; }
 .led.connected { background: var(--link); box-shadow: 0 0 6px color-mix(in srgb, var(--link) 60%, transparent); }
 .led.closed, .led.error { background: var(--fault); }
+/* New output in a tab you aren't looking at: blue until you look (SecureCRT's "new input" state). */
+.tab.unread .led.connected { background: var(--cable); box-shadow: 0 0 6px color-mix(in srgb, var(--cable) 60%, transparent); }
 @keyframes blink { 50% { opacity: 0.25; } }
 @media (prefers-reduced-motion: reduce) { .led.connecting { animation: none; } }
 

@@ -80,6 +80,7 @@ const db = {
     showStatusBar: true,
     // A first-run library (?empty) shows the master passphrase offer.
     vaultOffered: !empty,
+    quietTabSecs: 10,
   } as Args,
   bars: [
     {
@@ -158,6 +159,10 @@ class Device {
           this.hangUp();
           return;
         }
+        if (/^ping \S+/i.test(cmd)) {
+          this.ping(cmd.split(/\s+/)[1]);
+          continue;
+        }
         this.out("\r\n" + this.respond(cmd) + this.prompt);
       } else if (ch === "\x7f" || ch === "\b") {
         if (this.line) {
@@ -172,6 +177,15 @@ class Device {
         this.out(ch);
       }
     }
+  }
+  /** Slow output, like the real thing: shows the quiet-tab mark in background tabs. */
+  async ping(target: string) {
+    this.out(`\r\nType escape sequence to abort.\r\nSending 5, 100-byte ICMP Echos to ${target}, timeout is 2 seconds:\r\n`);
+    for (let i = 0; i < 5; i++) {
+      await wait(700);
+      this.out("!");
+    }
+    this.out(`\r\nSuccess rate is 100 percent (5/5), round-trip min/avg/max = 1/2/4 ms\r\n${this.prompt}`);
   }
   respond(cmd: string): string {
     const c = cmd.toLowerCase();

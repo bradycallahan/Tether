@@ -122,6 +122,8 @@ export interface Settings {
   showStatusBar: boolean;
   /** The master passphrase has been offered once (first run). */
   vaultOffered: boolean;
+  /** Mark a background tab whose busy output stopped this many seconds ago; 0 = off. */
+  quietTabSecs: number;
 }
 
 export interface WorkspaceTab {
