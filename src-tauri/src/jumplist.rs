@@ -1,6 +1,7 @@
 //! The taskbar jump list: right-click Tether's taskbar button (or its Start
 //! menu entry) for the most recent sessions, each opening with
-//! `tether.exe --session <id>` (see `launch.rs`). Windows only; elsewhere a no-op.
+//! `tether.exe --session <id>` (see `launch.rs`), plus two tasks (Quick
+//! connect, Local shell). Windows only; elsewhere a no-op.
 
 use serde::Deserialize;
 
@@ -19,6 +20,27 @@ fn safe_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
+/// The installer's shortcuts carry this AppUserModelID (the bundle identifier
+/// in tauri.conf.json). The process and the jump list must use the same one,
+/// or Windows files the list under a different taskbar button.
+#[cfg(windows)]
+pub const APP_ID: &str = "dev.tether.app";
+
+/// Called first thing at startup, before any window exists.
+#[cfg(windows)]
+pub fn set_app_id() {
+    use windows::core::HSTRING;
+    // SAFETY: a plain Win32 call with a valid string.
+    if let Err(e) =
+        unsafe { windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(&HSTRING::from(APP_ID)) }
+    {
+        log::warn!("couldn't set the AppUserModelID: {e}");
+    }
+}
+
+#[cfg(not(windows))]
+pub fn set_app_id() {}
+
 #[cfg(windows)]
 pub fn set(entries: Vec<Entry>) {
     // COM wants its own apartment; this runs rarely (when recents change).
@@ -34,7 +56,8 @@ pub fn set(_entries: Vec<Entry>) {}
 
 #[cfg(windows)]
 mod imp {
-    use super::{safe_id, Entry};
+    use super::{safe_id, Entry, APP_ID};
+    use crate::launch::TASKS;
     use std::collections::HashSet;
     use windows::core::{Interface, HSTRING};
     use windows::Win32::Storage::EnhancedStorage::PKEY_Title;
@@ -52,6 +75,18 @@ mod imp {
         format!("--session {id}")
     }
 
+    unsafe fn link(exe: &HSTRING, args: &str, title: &str, detail: &str) -> windows::core::Result<IShellLinkW> {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+        link.SetPath(exe)?;
+        link.SetArguments(&HSTRING::from(args))?;
+        link.SetDescription(&HSTRING::from(detail))?;
+        link.SetIconLocation(exe, 0)?;
+        let props: IPropertyStore = link.cast()?;
+        props.SetValue(&PKEY_Title, &PROPVARIANT::from(title))?;
+        props.Commit()?;
+        Ok(link)
+    }
+
     pub fn set(entries: &[Entry]) -> windows::core::Result<()> {
         // SAFETY: plain COM calls on this thread's own apartment, released before CoUninitialize.
         unsafe {
@@ -65,6 +100,7 @@ mod imp {
     unsafe fn build(entries: &[Entry]) -> windows::core::Result<()> {
         let exe = HSTRING::from(std::env::current_exe().map_err(|_| windows::core::Error::empty())?.as_os_str());
         let list: ICustomDestinationList = CoCreateInstance(&DestinationList, None, CLSCTX_INPROC_SERVER)?;
+        list.SetAppID(&HSTRING::from(APP_ID))?;
         let mut slots = 0u32;
         // Items the user removed from the list must not be added back (Windows refuses the whole category).
         let removed: IObjectArray = list.BeginList(&mut slots)?;
@@ -80,20 +116,26 @@ mod imp {
         }
         let items: IObjectCollection = CoCreateInstance(&EnumerableObjectCollection, None, CLSCTX_INPROC_SERVER)?;
         for e in entries.iter().filter(|e| safe_id(&e.id) && !gone.contains(&args(&e.id))).take(slots.max(1) as usize) {
-            let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
-            link.SetPath(&exe)?;
-            link.SetArguments(&HSTRING::from(args(&e.id)))?;
-            link.SetDescription(&HSTRING::from(e.detail.as_str()))?;
-            link.SetIconLocation(&exe, 0)?;
-            let props: IPropertyStore = link.cast()?;
-            props.SetValue(&PKEY_Title, &PROPVARIANT::from(e.name.as_str()))?;
-            props.Commit()?;
-            items.AddObject(&link)?;
+            items.AddObject(&link(&exe, &args(&e.id), &e.name, &e.detail)?)?;
         }
         let array: IObjectArray = items.cast()?;
         if array.GetCount()? > 0 {
-            list.AppendCategory(&HSTRING::from("Recent sessions"), &array)?;
+            // Refused (E_ACCESSDENIED) when the user turned off "Show recently
+            // opened items in Start, Jump Lists and File Explorer". That's their
+            // privacy choice: show the tasks alone.
+            if let Err(e) = list.AppendCategory(&HSTRING::from("Recent sessions"), &array) {
+                log::info!("recent sessions left out of the jump list: {e}");
+            }
         }
+        let tasks: IObjectCollection = CoCreateInstance(&EnumerableObjectCollection, None, CLSCTX_INPROC_SERVER)?;
+        for (flag, id) in TASKS {
+            let (title, detail) = match id {
+                "connect.quick" => ("Quick connect", "Connect to a host, port or serial line"),
+                _ => ("Local shell", "Open your default local shell"),
+            };
+            tasks.AddObject(&link(&exe, flag, title, detail)?)?;
+        }
+        list.AddUserTasks(&tasks.cast::<IObjectArray>()?)?;
         list.CommitList()
     }
 }

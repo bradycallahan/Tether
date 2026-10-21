@@ -786,6 +786,10 @@ class App {
 
   openTargets(list: LaunchTarget[]) {
     for (const t of list) {
+      if (t.kind === "command") {
+        commands.run(t.value);
+        continue;
+      }
       if (t.kind === "session") {
         const s = findSession(t.value, store.sessions);
         if (s) this.openSessions([s]);

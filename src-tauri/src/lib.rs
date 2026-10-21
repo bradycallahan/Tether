@@ -5,6 +5,7 @@ pub mod expect;
 pub mod import;
 pub mod jumplist;
 pub mod launch;
+pub mod links;
 pub mod local;
 pub mod logger;
 pub mod model;
@@ -24,6 +25,7 @@ use std::path::PathBuf;
 use store::Store;
 use tauri::ipc::Channel;
 use tauri::{Emitter as _, Manager as _, State};
+#[cfg(not(windows))]
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::mpsc;
@@ -296,21 +298,33 @@ fn take_launch_targets(state: State<AppState>) -> Vec<launch::Target> {
 /// let an app register itself (macOS registers through the bundle instead).
 #[tauri::command]
 fn link_handler_status(app: tauri::AppHandle) -> Option<bool> {
-    let dl = app.deep_link();
     let mut all = true;
     for scheme in launch::SCHEMES {
-        all &= dl.is_registered(scheme).ok()?;
+        #[cfg(windows)]
+        let on = links::is_registered(scheme).ok()?;
+        #[cfg(not(windows))]
+        let on = app.deep_link().is_registered(scheme).ok()?;
+        all &= on;
     }
+    #[cfg(windows)]
+    let _ = app;
     Some(all)
 }
 
 #[tauri::command]
 fn set_link_handler(app: tauri::AppHandle, on: bool) -> CmdResult<()> {
-    let dl = app.deep_link();
     for scheme in launch::SCHEMES {
-        let r = if on { dl.register(scheme) } else { dl.unregister(scheme) };
-        r.map_err(|e| CmdError::new("LINKS", format!("Windows didn't accept the change: {e}")))?;
+        // Windows: Tether's own registry code, which puts back another app's
+        // handler rather than deleting it (see links.rs).
+        #[cfg(windows)]
+        let r = if on { links::register(scheme) } else { links::unregister(scheme) }.map_err(|e| e.to_string());
+        #[cfg(not(windows))]
+        let r = if on { app.deep_link().register(scheme) } else { app.deep_link().unregister(scheme) }
+            .map_err(|e| e.to_string());
+        r.map_err(|e| CmdError::new("LINKS", format!("Couldn't change which app opens {scheme}:// links: {e}")))?;
     }
+    #[cfg(windows)]
+    let _ = app;
     Ok(())
 }
 
@@ -585,6 +599,7 @@ fn set_logging(state: State<AppState>, conn_id: String, enabled: bool) -> CmdRes
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    jumplist::set_app_id();
     let store = Store::locate().expect("could not open Tether's data directory");
     if let Err(e) = secrets::init(store.root()) {
         log::error!("couldn't read the saved-password vault: {e:#}");

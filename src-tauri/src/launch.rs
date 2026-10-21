@@ -13,7 +13,12 @@ pub enum Target {
     Session(String),
     /// An `ssh://` or `telnet://` URL.
     Url(String),
+    /// A command id from the UI's registry (jump list tasks).
+    Command(String),
 }
+
+/// Jump list tasks: flag, command id in the UI's registry.
+pub const TASKS: [(&str, &str); 2] = [("--quick-connect", "connect.quick"), ("--local-shell", "connect.local")];
 
 /// Pick the targets out of a command line (without the program name). Anything
 /// else is ignored, so stray flags from shortcuts or the OS can't do harm.
@@ -29,6 +34,8 @@ pub fn targets<I: IntoIterator<Item = String>>(args: I) -> Vec<Target> {
             if let Some(v) = args.next().filter(|v| !v.trim().is_empty()) {
                 out.push(Target::Session(v.trim().to_string()));
             }
+        } else if let Some((_, id)) = TASKS.iter().find(|(flag, _)| *flag == arg) {
+            out.push(Target::Command(id.to_string()));
         } else if is_link(&arg) {
             out.push(Target::Url(arg));
         }
@@ -58,12 +65,20 @@ mod tests {
     #[test]
     fn reads_sessions_and_links() {
         assert_eq!(
-            t(&["--session", "Core/core-sw1", "ssh://admin@10.0.0.1:2222", "--session=edge-fw1", "TELNET://ts1:2003"]),
+            t(&[
+                "--session",
+                "Core/core-sw1",
+                "ssh://admin@10.0.0.1:2222",
+                "--session=edge-fw1",
+                "TELNET://ts1:2003",
+                "--local-shell"
+            ]),
             vec![
                 Target::Session("Core/core-sw1".into()),
                 Target::Url("ssh://admin@10.0.0.1:2222".into()),
                 Target::Session("edge-fw1".into()),
                 Target::Url("TELNET://ts1:2003".into()),
+                Target::Command("connect.local".into()),
             ]
         );
     }
