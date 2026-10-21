@@ -121,7 +121,10 @@ fn host_key_error(issue: Option<HostKeyIssue>, host: &str, port: u16, fallback: 
             format!("The host key for {host} does not match the one on record (known_hosts line {line}). This can mean the device was replaced — or that someone is intercepting the connection."),
         )
         .with_detail(json!({ "host": host, "port": port, "fingerprint": fingerprint, "key": key, "line": line })),
-        None => CmdError::new("CONNECT", format!("Could not connect to {host}:{port}: {fallback}")),
+        None => {
+            let io = if let russh::Error::IO(e) = &fallback { Some(e) } else { None };
+            crate::conn::connect_error(host, port, io, &fallback)
+        }
     }
 }
 

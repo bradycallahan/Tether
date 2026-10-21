@@ -3,6 +3,9 @@
 pub mod conn;
 pub mod expect;
 pub mod import;
+pub mod jumplist;
+pub mod launch;
+pub mod links;
 pub mod local;
 pub mod logger;
 pub mod model;
@@ -11,6 +14,8 @@ pub mod serial;
 pub mod ssh;
 pub mod store;
 pub mod telnet;
+pub mod vault;
+pub mod window;
 
 use conn::{CmdError, CmdResult, ConnHandle, Ctl, Manager, Output, StatusEvent};
 use logger::{LogTarget, Logger};
@@ -19,13 +24,18 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use store::Store;
 use tauri::ipc::Channel;
-use tauri::State;
+use tauri::{Emitter as _, Manager as _, State};
+#[cfg(not(windows))]
+use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::mpsc;
 
 struct AppState {
     store: Store,
     manager: Manager,
+    placement: window::Placement,
+    /// What the command line asked to open, until the UI is ready for it.
+    launch: parking_lot::Mutex<Vec<launch::Target>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -108,7 +118,7 @@ fn save_settings(state: State<AppState>, settings: Settings) -> CmdResult<()> {
     Ok(state.store.save_settings(&settings)?)
 }
 
-const SECRET_KINDS: [&str; 3] = [secrets::PASSWORD, secrets::PASSPHRASE, secrets::ENABLE];
+const SECRET_KINDS: [&str; 3] = secrets::KINDS;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -116,15 +126,19 @@ struct SecretStatus {
     password: bool,
     passphrase: bool,
     enable: bool,
+    /// Saved but behind a master passphrase that hasn't been entered this run.
+    locked: bool,
 }
 
 #[tauri::command]
 fn secret_status(id: String) -> SecretStatus {
-    let has = |kind| secrets::get(&id, kind).ok().flatten().is_some();
+    let has = |kind| secrets::exists(&id, kind);
+    let (enabled, unlocked) = secrets::vault_status();
     SecretStatus {
         password: has(secrets::PASSWORD),
         passphrase: has(secrets::PASSPHRASE),
         enable: has(secrets::ENABLE),
+        locked: enabled && !unlocked,
     }
 }
 
@@ -135,7 +149,72 @@ fn set_secret(id: String, kind: String, value: String) -> CmdResult<()> {
         return Err(CmdError::new("ARG", "Unknown kind of secret."));
     };
     let r = if value.is_empty() { secrets::delete(&id, kind) } else { secrets::set(&id, kind, &value) };
-    r.map_err(|e| CmdError::new("KEYCHAIN", format!("The system keychain refused it: {e:#}")))
+    r.map_err(|e| CmdError::new("KEYCHAIN", format!("Couldn't save it: {e:#}")))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultStatus {
+    enabled: bool,
+    unlocked: bool,
+}
+
+#[tauri::command]
+fn vault_status() -> VaultStatus {
+    let (enabled, unlocked) = secrets::vault_status();
+    VaultStatus { enabled, unlocked }
+}
+
+/// Unlock saved secrets with the master passphrase; `BAD_PASSPHRASE` if it's wrong.
+#[tauri::command]
+async fn vault_unlock(passphrase: String) -> CmdResult<()> {
+    // Key derivation takes a moment by design; keep it off the main thread.
+    let ok = tauri::async_runtime::spawn_blocking(move || secrets::unlock(&passphrase))
+        .await
+        .map_err(|e| CmdError::new("ERROR", e.to_string()))??;
+    bad_passphrase(ok)
+}
+
+/// Set a master passphrase, moving every saved secret into the encrypted vault.
+#[tauri::command]
+async fn vault_enable(state: State<'_, AppState>, passphrase: String) -> CmdResult<()> {
+    let ids: Vec<String> = state.store.list_sessions()?.into_iter().map(|s| s.id).collect();
+    tauri::async_runtime::spawn_blocking(move || secrets::enable(&passphrase, &ids))
+        .await
+        .map_err(|e| CmdError::new("ERROR", e.to_string()))??;
+    Ok(())
+}
+
+fn bad_passphrase(ok: bool) -> CmdResult<()> {
+    if ok {
+        Ok(())
+    } else {
+        Err(CmdError::new("BAD_PASSPHRASE", "That isn't the master passphrase."))
+    }
+}
+
+/// Change the master passphrase; the current one is asked again.
+#[tauri::command]
+async fn vault_change(current: String, passphrase: String) -> CmdResult<()> {
+    let ok = tauri::async_runtime::spawn_blocking(move || secrets::change(&current, &passphrase))
+        .await
+        .map_err(|e| CmdError::new("ERROR", e.to_string()))??;
+    bad_passphrase(ok)
+}
+
+/// Remove the master passphrase, moving saved secrets back to the system keychain.
+#[tauri::command]
+async fn vault_disable(current: String) -> CmdResult<()> {
+    let ok = tauri::async_runtime::spawn_blocking(move || secrets::disable(&current))
+        .await
+        .map_err(|e| CmdError::new("ERROR", e.to_string()))??;
+    bad_passphrase(ok)
+}
+
+/// For a forgotten passphrase: drop the vault and the secrets in it.
+#[tauri::command]
+fn vault_reset() -> CmdResult<()> {
+    Ok(secrets::reset()?)
 }
 
 #[tauri::command]
@@ -166,6 +245,11 @@ fn default_shell() -> String {
 }
 
 #[tauri::command]
+async fn list_shells() -> Vec<local::ShellInfo> {
+    tokio::task::spawn_blocking(local::list_shells).await.unwrap_or_default()
+}
+
+#[tauri::command]
 fn open_folder(app: tauri::AppHandle, state: State<AppState>, which: String) -> CmdResult<()> {
     let settings = state.store.settings()?;
     let path = match which.as_str() {
@@ -180,6 +264,91 @@ fn open_folder(app: tauri::AppHandle, state: State<AppState>, which: String) -> 
 #[tauri::command]
 fn data_dir(state: State<AppState>) -> String {
     state.store.root().to_string_lossy().into_owned()
+}
+
+/// The UI calls this once its first frame is ready, so the window never
+/// appears blank or flashes white.
+#[tauri::command]
+fn window_ready(win: tauri::WebviewWindow, state: State<AppState>) {
+    if win.label() == "main" {
+        window::show(&win, &state.placement);
+    } else {
+        window::show_dialog(&win);
+    }
+}
+
+#[tauri::command]
+fn set_title_bar_colors(win: tauri::WebviewWindow, caption: String, text: String) {
+    window::set_title_bar_colors(&win, &caption, &text);
+}
+
+/// Recent sessions for the taskbar jump list (Windows).
+#[tauri::command]
+fn set_jump_list(entries: Vec<jumplist::Entry>) {
+    jumplist::set(entries);
+}
+
+/// What Tether was started to open; handed over once, after the workspace is restored.
+#[tauri::command]
+fn take_launch_targets(state: State<AppState>) -> Vec<launch::Target> {
+    std::mem::take(&mut *state.launch.lock())
+}
+
+/// Whether Tether is set up for ssh:// and telnet:// links. None where the OS
+/// doesn't let an app register itself (macOS registers through the bundle).
+/// On Windows this means "offered": the user picks the default in Settings.
+#[tauri::command]
+fn link_handler_status(app: tauri::AppHandle) -> Option<bool> {
+    #[cfg(windows)]
+    {
+        let _ = app;
+        links::is_registered(&launch::SCHEMES).ok()
+    }
+    #[cfg(not(windows))]
+    {
+        let dl = app.deep_link();
+        let mut all = true;
+        for scheme in launch::SCHEMES {
+            all &= dl.is_registered(scheme).ok()?;
+        }
+        Some(all)
+    }
+}
+
+#[tauri::command]
+fn set_link_handler(app: tauri::AppHandle, on: bool) -> CmdResult<()> {
+    let fail = |e: String| CmdError::new("LINKS", format!("Couldn't change how ssh:// and telnet:// links open: {e}"));
+    #[cfg(windows)]
+    {
+        let _ = app;
+        let r = if on { links::register(&launch::SCHEMES) } else { links::unregister(&launch::SCHEMES) };
+        r.map_err(|e| fail(e.to_string()))
+    }
+    #[cfg(not(windows))]
+    {
+        let dl = app.deep_link();
+        for scheme in launch::SCHEMES {
+            let r = if on { dl.register(scheme) } else { dl.unregister(scheme) };
+            r.map_err(|e| fail(e.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+/// Windows only: Settings > Default apps, where the user makes Tether the default.
+#[tauri::command]
+fn open_default_apps(app: tauri::AppHandle) -> CmdResult<()> {
+    #[cfg(windows)]
+    {
+        app.opener()
+            .open_url(links::DEFAULT_APPS, None::<&str>)
+            .map_err(|e| CmdError::new("ERROR", format!("Couldn't open Windows Settings: {e}")))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -453,11 +622,57 @@ fn set_logging(state: State<AppState>, conn_id: String, enabled: bool) -> CmdRes
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    jumplist::set_app_id();
     let store = Store::locate().expect("could not open Tether's data directory");
+    if let Err(e) = secrets::init(store.root()) {
+        log::error!("couldn't read the saved-password vault: {e:#}");
+    }
     tauri::Builder::default()
+        // First, so a second launch exits before doing any other work.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.unminimize();
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+            let targets = launch::targets(argv.into_iter().skip(1));
+            if !targets.is_empty() {
+                let _ = app.emit_to("main", "open-targets", targets);
+            }
+        }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(AppState { store, manager: Manager::default() })
+        .manage(AppState {
+            store,
+            manager: Manager::default(),
+            placement: window::Placement::default(),
+            launch: parking_lot::Mutex::new(launch::targets(std::env::args().skip(1))),
+        })
+        .setup(|app| {
+            if let Some(win) = app.get_webview_window("main") {
+                let state = app.state::<AppState>();
+                window::restore(&win, &state.store, &state.placement);
+                // If the UI never reports in (a script error, say), show the
+                // window anyway rather than leave an invisible process.
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(4));
+                    let state = win.state::<AppState>();
+                    window::show(&win, &state.placement);
+                });
+            }
+            Ok(())
+        })
+        .on_window_event(|win, event| {
+            // Only the main window's placement is remembered; dialogs centre on it.
+            if win.label() != "main" {
+                return;
+            }
+            if let Some(webview) = win.app_handle().get_webview_window(win.label()) {
+                let state = webview.state::<AppState>();
+                window::on_event(&webview, event, &state.store, &state.placement);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             save_session,
@@ -479,8 +694,22 @@ pub fn run() {
             import_securecrt,
             list_serial_ports,
             default_shell,
+            list_shells,
             open_folder,
             data_dir,
+            window_ready,
+            set_title_bar_colors,
+            take_launch_targets,
+            set_jump_list,
+            link_handler_status,
+            set_link_handler,
+            open_default_apps,
+            vault_status,
+            vault_unlock,
+            vault_enable,
+            vault_change,
+            vault_disable,
+            vault_reset,
             trust_host_key,
             connect,
             write,

@@ -1,9 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permissions for Tether's main window",
+  "description": "Permissions for Tether's main window and its dialog windows",
   "windows": [
-    "main"
+    "main",
+    "dialog-*"
   ],
   "permissions": [
     "core:default",
@@ -16,6 +17,16 @@
     "core:window:allow-close",
     "core:window:allow-destroy",
     "core:window:allow-set-fullscreen",
-    "core:window:allow-is-fullscreen"
+    "core:window:allow-is-fullscreen",
+    "core:window:allow-set-theme",
+    "core:window:allow-request-user-attention",
+    "core:window:allow-set-always-on-top",
+    "core:webview:allow-create-webview-window",
+    "core:window:allow-set-enabled",
+    "core:window:allow-set-focus",
+    "core:window:allow-show",
+    "core:window:allow-set-size",
+    "core:window:allow-set-min-size",
+    "core:window:allow-set-position"
   ]
 }

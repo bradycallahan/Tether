@@ -17,6 +17,8 @@ export default defineConfig({
     alias: [
       { find: "@tauri-apps/api/core", replacement: mock("core.ts") },
       { find: "@tauri-apps/api/window", replacement: mock("window.ts") },
+      { find: "@tauri-apps/api/webviewWindow", replacement: mock("webviewWindow.ts") },
+      { find: "@tauri-apps/api/event", replacement: mock("event.ts") },
       { find: "@tauri-apps/plugin-dialog", replacement: mock("dialog.ts") },
       { find: "@tauri-apps/plugin-opener", replacement: mock("opener.ts") },
     ],

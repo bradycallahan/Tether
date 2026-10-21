@@ -1,7 +1,7 @@
 import { api } from "./api";
-import type { ButtonBar, HighlightSet, Session, Settings, Workspace } from "./types";
+import type { ButtonBar, HighlightSet, Session, Settings, ShellInfo, Workspace } from "./types";
 
-type Topic = "sessions" | "bars" | "highlights" | "settings" | "recent";
+export type Topic = "sessions" | "bars" | "highlights" | "settings" | "recent";
 
 const RECENT_MAX = 12;
 
@@ -14,8 +14,11 @@ class Store {
   /** Folders created explicitly (possibly empty). */
   explicitFolders: string[] = [];
   workspace: Workspace = { tabs: [], active: 0, tiled: false, recent: [] };
+  /** In a dialog window: passes each change on to the main window. */
+  relay: ((topic: Topic) => void) | undefined;
   private listeners = new Map<Topic, Set<() => void>>();
   private workspaceTimer: number | undefined;
+  private shellList: Promise<ShellInfo[]> | undefined;
 
   async load() {
     [this.sessions, this.bars, this.highlights, this.settings, this.explicitFolders, this.workspace] = await Promise.all([
@@ -28,6 +31,12 @@ class Store {
     ]);
   }
 
+  /** Shells installed on this machine, default first. Probed once, on first use. */
+  shells(): Promise<ShellInfo[]> {
+    this.shellList ??= api.listShells().catch(() => []);
+    return this.shellList;
+  }
+
   on(topic: Topic, fn: () => void) {
     if (!this.listeners.has(topic)) this.listeners.set(topic, new Set());
     this.listeners.get(topic)!.add(fn);
@@ -35,6 +44,17 @@ class Store {
 
   emit(topic: Topic) {
     this.listeners.get(topic)?.forEach((fn) => fn());
+    this.relay?.(topic);
+  }
+
+  /** Re-read one part of the library after another window changed it. */
+  async reload(topic: Topic) {
+    if (topic === "sessions") [this.sessions, this.explicitFolders] = await Promise.all([api.listSessions(), api.getFolders().catch(() => [])]);
+    else if (topic === "bars") this.bars = await api.getButtonBars();
+    else if (topic === "highlights") this.highlights = await api.getHighlights();
+    else if (topic === "settings") this.settings = await api.getSettings();
+    else return;
+    this.emit(topic);
   }
 
   session(id: string | null | undefined) {
@@ -102,7 +122,11 @@ class Store {
 
   async moveSessions(ids: string[], folder: string) {
     const set = new Set(ids);
-    await this.saveSessions(this.sessions.filter((s) => set.has(s.id) && s.folder !== folder).map((s) => ({ ...s, folder })));
+    const moving = this.sessions.filter((s) => set.has(s.id) && s.folder !== folder);
+    // A folder the last session was dragged out of stays, as an empty folder.
+    const emptied = [...new Set(moving.map((s) => s.folder))].filter((f) => f && !this.sessions.some((s) => s.folder === f && !set.has(s.id)));
+    await this.saveSessions(moving.map((s) => ({ ...s, folder })));
+    if (emptied.some((f) => !this.explicitFolders.includes(f))) await this.setFolders([...this.explicitFolders, ...emptied]);
   }
 
   private async setFolders(list: string[]) {

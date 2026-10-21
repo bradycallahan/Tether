@@ -267,6 +267,8 @@ pub struct Settings {
     pub show_toolbar: bool,
     pub show_sidebar: bool,
     pub show_status_bar: bool,
+    /// The master passphrase has been offered (once, at first run).
+    pub vault_offered: bool,
 }
 
 impl Default for Settings {
@@ -291,7 +293,7 @@ impl Default for Settings {
             log_directory: String::new(),
             reconnect_on_enter: true,
             show_command_bar: false,
-            show_button_bar: true,
+            show_button_bar: false,
             sidebar_width: 260,
             // WebKitGTK can stall repaints of background WebGL canvases.
             gpu_rendering: !cfg!(target_os = "linux"),
@@ -299,6 +301,7 @@ impl Default for Settings {
             show_toolbar: true,
             show_sidebar: true,
             show_status_bar: true,
+            vault_offered: false,
         }
     }
 }
@@ -328,6 +331,20 @@ pub struct WorkspaceTab {
     pub title: String,
     #[serde(default = "yes")]
     pub in_broadcast: bool,
+}
+
+/// Where the main window was when Tether last closed (`window.toml`). Only
+/// the backend reads it; the UI never sees it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WindowPlacement {
+    /// Outer top-left corner, in physical pixels.
+    pub x: i32,
+    pub y: i32,
+    /// Inner size in logical pixels, so it survives a change of display scaling.
+    pub width: f64,
+    pub height: f64,
+    pub maximized: bool,
 }
 
 fn yes() -> bool {

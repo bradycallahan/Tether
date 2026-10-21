@@ -13,6 +13,14 @@ export interface DialogParts {
   onSubmit?: () => void;
 }
 
+/** Set by a dialog window (dialogwin.ts): the next modal fills that window
+ * instead of floating over the page, and is handed over to be sized and shown. */
+let windowHost: ((dlg: HTMLDialogElement, title: string) => void) | undefined;
+
+export function hostNextModal(host: (dlg: HTMLDialogElement, title: string) => void) {
+  windowHost = host;
+}
+
 /**
  * Show a modal. `build` receives `done(value)`; pressing Escape resolves
  * with `undefined`. Returns whatever was passed to `done`.
@@ -47,10 +55,15 @@ export function modal<T>(build: (done: (v: T | undefined) => void) => DialogPart
     dlg.append(form);
     dlg.addEventListener("cancel", (e) => {
       e.preventDefault();
+      // Esc that closed a color picker's popup shouldn't also discard the dialog.
+      if (document.activeElement instanceof HTMLInputElement && document.activeElement.type === "color") return;
       done(undefined);
     });
+    const host = windowHost;
+    windowHost = undefined;
     document.body.append(dlg);
     dlg.showModal();
+    host?.(dlg, parts.title);
     const target = parts.focus ?? (dlg.querySelector("input:not([type=checkbox]), textarea, select") as HTMLElement | null) ?? (dlg.querySelector(".btn.primary") as HTMLElement | null);
     target?.focus();
     if (target instanceof HTMLInputElement) target.select();
@@ -76,11 +89,11 @@ export function button(label: string | Node, opts: { kind?: "primary" | "danger"
   );
 }
 
-export async function confirmDialog(o: { title: string; message: string | Node; confirm: string; danger?: boolean; cancel?: string }): Promise<boolean> {
+export async function confirmDialog(o: { title: string; message: string | Node; confirm: string; danger?: boolean; warn?: boolean; cancel?: string }): Promise<boolean> {
   const r = await modal<boolean>((done) => ({
     title: o.title,
     intro: o.message,
-    foot: [button(o.cancel ?? "Cancel", { onclick: () => done(false) }), button(o.confirm, { kind: o.danger ? "danger solid" : "primary", submit: true })],
+    foot: [button(o.cancel ?? "Cancel", { onclick: () => done(false) }), button(o.confirm, { kind: o.danger ? "danger solid" : o.warn ? "warn" : "primary", submit: true })],
     onSubmit: () => done(true),
   }));
   return r === true;
@@ -120,7 +133,7 @@ export async function promptSecret(o: {
     intro: o.intro,
     body: [
       h("label", { class: `field ${o.error ? "error" : ""}` }, h("span", {}, o.label), input, o.error ? h("span", { class: "err" }, o.error) : null),
-      o.allowRemember ? check("Save in the system keychain", remember) : null,
+      o.allowRemember ? check("Save password", remember) : null,
     ].filter(Boolean) as Node[],
     foot: [button("Cancel", { onclick: () => done(undefined) }), button("Connect", { kind: "primary", submit: true })],
     onSubmit: () => done({ value: input.value, remember: o.allowRemember && remember.checked }),

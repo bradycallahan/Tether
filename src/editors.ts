@@ -1,11 +1,13 @@
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
 import { clear, h, icon } from "./dom";
-import { button, check, field, modal, toast } from "./dialogs";
+import { alertDialog, button, check, confirmDialog, field, modal, toast } from "./dialogs";
 import { describeSend } from "./escapes";
 import { SCHEMES, scheme } from "./schemes";
 import { store } from "./state";
 import { compileRules } from "./highlight";
+import { securityPanel } from "./vault";
+import { platform } from "./platform";
 import type { IconName } from "./commands";
 import {
   defaultProtocol,
@@ -221,11 +223,41 @@ function protocolForm(initial: Protocol, selfId: string | null): ProtocolForm {
         };
       };
     } else {
-      const shell = input(p.shell, { placeholder: "Your default shell" });
-      api.defaultShell().then((d) => (shell.placeholder = `Default: ${d}`)).catch(() => {});
-      box.append(field("Shell", shell, "Leave blank for your default shell. Arguments work, e.g. wsl -d Ubuntu."));
-      first = shell;
-      collect = () => ({ kind: "local", shell: shell.value.trim() });
+      // A picker of the shells found on this machine, plus "Other" for a
+      // command line of your own (arguments and quoted paths work).
+      const custom = input(p.shell, { placeholder: 'wsl.exe -d Ubuntu or "C:\\Tools\\my shell.exe" -l' });
+      const OTHER = "\u0000other";
+      // Until the probe answers, the saved command stands in as its own option.
+      const pick = h("select", {}, h("option", { value: "" }, "Default shell"), p.shell ? h("option", { value: p.shell, selected: true }, p.shell) : null);
+      const customField = field("Command", custom, "Quote a path that has spaces in it.");
+      customField.hidden = true;
+      const sync = () => {
+        customField.hidden = pick.value !== OTHER;
+      };
+      pick.addEventListener("change", () => {
+        sync();
+        if (!customField.hidden) custom.focus();
+      });
+      store.shells().then((list) => {
+        const current = pick.value;
+        clear(pick);
+        pick.append(
+          h("option", { value: "" }, list[0] ? `Default shell (${list[0].name})` : "Default shell"),
+          ...list.map((sh) => h("option", { value: sh.command }, sh.name)),
+          h("option", { value: OTHER }, "Other…"),
+        );
+        const known = current === "" || list.some((sh) => sh.command === current);
+        if (!known) custom.value = current;
+        pick.value = known ? current : OTHER;
+        sync();
+      });
+      box.append(field("Shell", pick), customField);
+      first = pick;
+      collect = () => {
+        if (pick.value !== OTHER) return { kind: "local", shell: pick.value };
+        if (!custom.value.trim()) return "Enter the command that starts the shell, or pick one from the list.";
+        return { kind: "local", shell: custom.value.trim() };
+      };
     }
   };
   renderKinds();
@@ -352,7 +384,7 @@ function loginStepsEditor(s: Session) {
   const help = h("div", { class: "hint-block" },
     h("p", {}, "Each step waits until the device shows the text (case doesn't matter), then sends the reply. Leave “Wait for” empty to send as soon as output settles."),
     h("p", {}, h("code", {}, "\\r"), " presses Enter, ", h("code", {}, "\\p"), " pauses half a second, ", h("code", {}, "^C"), " sends Ctrl+C. ",
-      h("code", {}, "{username}"), ", ", h("code", {}, "{password}"), " and ", h("code", {}, "{enable}"), " are filled in from the session and the system keychain, so passwords never appear here."),
+      h("code", {}, "{username}"), ", ", h("code", {}, "{password}"), " and ", h("code", {}, "{enable}"), " are filled in from the session and its saved passwords, so passwords never appear here."),
   );
   const el = h("div", { class: "stack-12" },
     rows,
@@ -405,7 +437,7 @@ export async function editSession(original: Session, opts: { isNew: boolean; pag
   const password = h("input", { type: "password", autocomplete: "off" });
   const enable = h("input", { type: "password", autocomplete: "off" });
   const credNote = h("span", { class: "hint" });
-  const saved = { password: false, enable: false };
+  const saved = { password: false, enable: false, locked: false };
   const forget = button("Forget saved passwords", {
     kind: "danger",
     onclick: async () => {
@@ -413,7 +445,7 @@ export async function editSession(original: Session, opts: { isNew: boolean; pag
       saved.password = saved.enable = false;
       forget.hidden = true;
       renderCredNote();
-      toast("Saved passwords removed from the keychain.");
+      toast("Saved passwords removed.");
     },
   });
   forget.hidden = true;
@@ -428,19 +460,25 @@ export async function editSession(original: Session, opts: { isNew: boolean; pag
   );
   const renderCredNote = () => {
     const k = proto.kind();
-    const kept = "Saved in the keychain \u2014 type to replace";
+    const kept = "Saved \u2014 type to replace";
     credBox.hidden = k === "local";
     loginUserField.hidden = k === "ssh";
-    password.placeholder = saved.password ? kept : k === "ssh" ? "Asked when connecting" : "Not saved";
-    enable.placeholder = saved.enable ? kept : "Not saved";
-    credNote.textContent = k === "ssh"
-      ? "Saved to your system keychain, never to Tether's files. Leave the password blank to be asked each time. The enable password is used by login actions."
-      : "Saved to your system keychain. Login actions send them with {username}, {password} and {enable}.";
+    // A locked vault can't take new values, and a blank field mustn't look like nothing is saved.
+    const locked = "Saved, locked until you enter your master passphrase";
+    password.placeholder = saved.password ? (saved.locked ? locked : kept) : k === "ssh" ? "Asked when connecting" : "Not saved";
+    enable.placeholder = saved.enable ? (saved.locked ? locked : kept) : "Not saved";
+    password.disabled = enable.disabled = saved.locked;
+    credNote.textContent = saved.locked
+      ? "Saved passwords are locked. Unlock them under Settings > Security to change them; connecting still asks for anything it needs."
+      : k === "ssh"
+      ? "Saved encrypted, never in Tether's session files. Leave the password blank to be asked each time. The enable password is used by login actions."
+      : "Saved encrypted. Login actions send them with {username}, {password} and {enable}.";
   };
   if (!opts.isNew) {
     api.secretStatus(s.id).then((st) => {
       saved.password = st.password;
       saved.enable = st.enable;
+      saved.locked = st.locked;
       forget.hidden = !(st.password || st.passphrase || st.enable);
       renderCredNote();
     }).catch(() => {});
@@ -674,7 +712,7 @@ export async function quickConnectDialog(kind: ProtocolKind = "ssh"): Promise<{ 
 // ---------------------------------------------------------------------------
 // Settings
 
-export type SettingsPage = "appearance" | "terminal" | "highlighting" | "buttons" | "files";
+export type SettingsPage = "appearance" | "terminal" | "highlighting" | "buttons" | "files" | "security";
 
 export async function editSettings(
   actions: { importSecureCrt: () => void; editBars: () => void; editHighlights: () => void },
@@ -717,6 +755,45 @@ export async function editSettings(
   });
   const dataDir = h("span", { class: "mono path" }, "…");
   api.dataDir().then((d) => (dataDir.textContent = d)).catch(() => {});
+  // Applies at once (it's a system setting, not part of Tether's own settings file).
+  // Windows doesn't let an app make itself the default: Tether offers itself,
+  // and the user picks it in Default apps (or the first time a link opens).
+  const win = platform === "windows";
+  const links = h("input", { type: "checkbox" });
+  const defaultApps = button("Open Default apps", { onclick: () => void api.openDefaultApps().catch((e) => toast(e?.message ?? String(e))) });
+  const linksRow = h("div", {},
+    check(
+      win ? "Offer Tether for ssh:// and telnet:// links" : "Open ssh:// and telnet:// links with Tether",
+      links,
+      win
+        ? "Links in browsers, tickets and wikis can open a tab here. Windows asks which app to use the first time you open one, or choose Tether in Settings > Default apps. Other apps' link settings aren't changed."
+        : "Links in browsers, tickets and wikis open a tab here. Turning this off removes Tether as the handler.",
+    ),
+    win ? h("div", { class: "inline under-check" }, defaultApps) : null,
+  );
+  linksRow.hidden = true;
+  const syncLinks = () => (defaultApps.disabled = !links.checked);
+  api.linkHandlerStatus().then((on) => {
+    if (on === null) return;
+    links.checked = on;
+    syncLinks();
+    linksRow.hidden = false;
+  }).catch(() => {});
+  links.addEventListener("change", () => {
+    syncLinks();
+    api.setLinkHandler(links.checked).then(
+      () => {
+        if (!links.checked) toast("Tether no longer offers to open ssh:// and telnet:// links.");
+        else if (win) toast("Tether is now offered for ssh:// and telnet:// links.", { action: { label: "Open Default apps", run: () => void api.openDefaultApps().catch(() => {}) } });
+        else toast("ssh:// and telnet:// links now open in Tether.");
+      },
+      (e) => {
+        links.checked = !links.checked;
+        syncLinks();
+        toast(e?.message ?? "Couldn't change the link handler.");
+      },
+    );
+  });
 
   const cats = categories([
     {
@@ -776,10 +853,12 @@ export async function editSettings(
           button("Open log folder", { onclick: () => api.openFolder("logs") }),
           button(h("span", { class: "inline" }, icon("import"), "Import SecureCRT sessions…"), { onclick: actions.importSecureCrt }),
         ),
+        linksRow,
       ),
     },
+    { name: "Security", icon: "lock", el: securityPanel() },
   ]);
-  const pages: SettingsPage[] = ["appearance", "terminal", "highlighting", "buttons", "files"];
+  const pages: SettingsPage[] = ["appearance", "terminal", "highlighting", "buttons", "files", "security"];
   if (page) cats.show(Math.max(0, pages.indexOf(page)));
 
   return modal((done) => ({
@@ -1067,4 +1146,97 @@ export async function editHighlights(): Promise<HighlightSet[] | undefined> {
     foot: [button("Cancel", { onclick: () => done(undefined) }), button("Save", { kind: "primary", submit: true })],
     onSubmit: () => done(sets.map((s) => ({ ...s, name: s.name.trim() || "Untitled", rules: s.rules.filter((r) => r.pattern) }))),
   }));
+}
+
+// ---------------------------------------------------------------------------
+// SecureCRT import
+
+/** Pick SecureCRT's Sessions folder and add what's new in it to the library. */
+export async function importSecureCrt() {
+  const proceed = await confirmDialog({
+    title: "Import SecureCRT sessions",
+    message: h("span", {},
+      "Choose SecureCRT's Sessions folder. On Windows it's usually ",
+      h("span", { class: "mono" }, "%APPDATA%\\VanDyke\\Config\\Sessions"),
+      ", and on macOS ",
+      h("span", { class: "mono" }, "~/Library/Application Support/VanDyke/SecureCRT/Config/Sessions"),
+      ". Hosts, ports, usernames, serial settings and folders come across; saved passwords don't."),
+    confirm: "Choose folder…",
+  });
+  if (!proceed) return;
+  const dir = await openDialog({ directory: true, multiple: false, title: "SecureCRT Sessions folder" });
+  if (typeof dir !== "string") return;
+  try {
+    const report = await api.importSecureCrt(dir);
+    if (!report.sessions.length) {
+      await alertDialog("Nothing to import", report.skipped.length ? `Skipped ${report.skipped.length} file(s) with unsupported protocols.` : "No session files were found in that folder. Make sure it's the Sessions folder itself.");
+      return;
+    }
+    const existing = new Set(store.sessions.map((s) => `${s.folder}/${s.name}`.toLowerCase()));
+    const fresh = report.sessions.filter((s) => !existing.has(`${s.folder}/${s.name}`.toLowerCase()));
+    const dupes = report.sessions.length - fresh.length;
+    if (!fresh.length) {
+      await alertDialog("Already imported", `All ${report.sessions.length} sessions in that folder are already in your library.`);
+      return;
+    }
+    const ok = await modal<boolean>((done) => ({
+      title: `Import ${fresh.length} session${fresh.length === 1 ? "" : "s"}?`,
+      body: h("div", { class: "callout" },
+        h("div", {}, `${report.sessions.length} found.`),
+        dupes ? h("div", {}, `${dupes} already exist with the same name and folder and will be left alone.`) : null,
+        report.skipped.length ? h("div", {}, `${report.skipped.length} skipped (unsupported protocols such as TAPI or RLogin).`) : null,
+      ),
+      foot: [h("button", { type: "button", class: "btn", onclick: () => done(false) }, "Cancel"), h("button", { type: "submit", class: "btn primary" }, `Import ${fresh.length}`)],
+      onSubmit: () => done(true),
+    }));
+    if (ok) {
+      await store.saveSessions(fresh);
+      toast(`Imported ${fresh.length} session${fresh.length === 1 ? "" : "s"}`);
+    }
+  } catch (e) {
+    await alertDialog("Import failed", (e as { message?: string }).message ?? String(e));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dialog windows
+
+/** Each options dialog, as something that can be sent to its own window. */
+export type DialogRequest =
+  | { kind: "session"; session: Session; isNew: boolean; page?: "login" }
+  | { kind: "quick"; protocol?: ProtocolKind }
+  | { kind: "settings"; page?: SettingsPage }
+  | { kind: "bars"; bar?: string }
+  | { kind: "button"; bar: string; index: number | null }
+  | { kind: "highlights" };
+
+/** Run a dialog in this page. Editors opened from Settings save their own changes. */
+export function runDialog(r: DialogRequest): Promise<unknown> {
+  switch (r.kind) {
+    case "session":
+      return editSession(r.session, { isNew: r.isNew, page: r.page });
+    case "quick":
+      return quickConnectDialog(r.protocol);
+    case "settings":
+      return editSettings(
+        {
+          importSecureCrt,
+          editBars: async () => {
+            const bars = await editButtonBars();
+            if (bars) await store.saveBars(bars);
+          },
+          editHighlights: async () => {
+            const sets = await editHighlights();
+            if (sets) await store.saveHighlights(sets);
+          },
+        },
+        r.page,
+      );
+    case "bars":
+      return editButtonBars(r.bar);
+    case "button":
+      return editButton(r.bar, r.index);
+    case "highlights":
+      return editHighlights();
+  }
 }

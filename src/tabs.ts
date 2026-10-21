@@ -12,10 +12,11 @@ import { commands, isMac } from "./commands";
 import { h, icon } from "./dom";
 import { confirmDialog, hostKeyDialog, pasteConfirm, promptSecret, promptText, toast } from "./dialogs";
 import { Highlighter } from "./highlight";
-import { showMenu, type MenuEntry } from "./menu";
+import { fromKeyboard, menuPoint, showMenu, type MenuEntry } from "./menu";
 import { scheme } from "./schemes";
 import { store } from "./state";
-import { playSendString } from "./escapes";
+import { describeSend, playSendString } from "./escapes";
+import { requestAttention } from "./platform";
 import { hostLabel, PROTOCOL_NAMES, type CmdError, type Session, type StatusEvent } from "./types";
 
 export type TabState = "idle" | "connecting" | "connected" | "closed";
@@ -55,6 +56,7 @@ export class Tab {
   readonly connId = crypto.randomUUID();
   state: TabState = "idle";
   statusMessage = "Not connected";
+  private everConnected = false;
   logPath: string | null = null;
   inBroadcast = true;
   title: string;
@@ -138,7 +140,8 @@ export class Tab {
         },
         oncontextmenu: (e: MouseEvent) => {
           e.preventDefault();
-          host.tabMenu(this, e.clientX, e.clientY);
+          const at = menuPoint(e);
+          host.tabMenu(this, at.x, at.y);
         },
         onkeydown: (e: KeyboardEvent) => {
           if (e.key === "Enter" || e.key === " ") host.activate(this);
@@ -202,6 +205,7 @@ export class Tab {
         this.pane.classList.add("bell");
       }
       if (!this.host.isVisible(this)) this.tabEl.classList.add("unread");
+      requestAttention();
     });
     t.onSelectionChange(() => {
       if (store.settings.copyOnSelect && t.hasSelection()) navigator.clipboard.writeText(t.getSelection()).catch(() => {});
@@ -220,7 +224,11 @@ export class Tab {
     );
     this.termEl.addEventListener("contextmenu", (e) => {
       e.preventDefault();
-      if (store.settings.rightClickPaste) {
+      // The Menu key always opens the menu: a keystroke must never paste.
+      if (fromKeyboard(e)) {
+        const at = menuPoint(e);
+        this.terminalMenu(at.x, at.y);
+      } else if (store.settings.rightClickPaste) {
         if (t.hasSelection()) {
           this.copySelection();
           t.clearSelection();
@@ -243,10 +251,6 @@ export class Tab {
     if (!isMac && e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "c" && this.term.hasSelection()) {
       this.copySelection();
       this.term.clearSelection();
-      return false;
-    }
-    if (e.shiftKey && e.key === "Insert") {
-      this.pasteFromClipboard();
       return false;
     }
     return true;
@@ -539,6 +543,9 @@ export class Tab {
       this.logPath = info.logPath;
       this.reconnectAttempt = 0;
       if (this.state !== "connected") this.setState("connected", `Connected to ${hostLabel(this.session.protocol)}`);
+      // Pairs with the "Disconnected" line so the scrollback shows the gap.
+      if (this.everConnected) this.info(`— Connected. ${new Date().toLocaleTimeString()}`, "32");
+      this.everConnected = true;
       api.resize(this.connId, this.term.cols, this.term.rows);
       this.scheduleAntiIdle();
     } catch (raw) {
@@ -625,6 +632,7 @@ export class Tab {
         this.logPath = null;
         this.info(`— ${ev.message} ${new Date().toLocaleTimeString()}`, "33");
         if (this.session.autoReconnect && !this.userClosed) this.scheduleReconnect();
+        if (!this.userClosed) requestAttention();
         this.setState("closed", ev.message);
         break;
       }
@@ -850,6 +858,13 @@ export class TabManager implements TabHost {
     if (opts.activate !== false || !this.active) this.activate(tab);
     tab.mount();
     tab.applySettings();
+    // A second tab to the same device reads "core-sw1 (2)", so the strip tells them apart.
+    const taken = new Set(this.tabs.filter((t) => t !== tab).map((t) => t.title));
+    if (taken.has(tab.title)) {
+      let n = 2;
+      while (taken.has(`${tab.title} (${n})`)) n++;
+      tab.setTitle(`${tab.title} (${n})`, false);
+    }
     if (opts.connect !== false) {
       // Wait a frame so the terminal has measured itself before we report a size.
       requestAnimationFrame(() => requestAnimationFrame(() => tab.connect()));
@@ -929,8 +944,18 @@ export class TabManager implements TabHost {
     return this.active.state === "connected" ? [this.active] : [];
   }
 
-  async sendString(str: string) {
-    const targets = this.targets();
+  /** Send to the usual targets, or with `everywhere` to every connected tab (after a confirmation when that's more than one). */
+  async sendString(str: string, everywhere = false) {
+    const targets = everywhere ? this.tabs.filter((t) => t.state === "connected") : this.targets();
+    if (everywhere && targets.length > 1) {
+      const ok = await confirmDialog({
+        title: `Send to all ${targets.length} connected tabs?`,
+        message: h("span", {}, "Sends ", h("code", {}, describeSend(str)), " to every connected tab, not only this one."),
+        confirm: `Send to ${targets.length} tabs`,
+        warn: true,
+      });
+      if (!ok) return;
+    }
     if (!targets.length) {
       toast(this.active ? "This tab isn't connected. Press Enter in it to reconnect." : "Open a session first.");
       return;

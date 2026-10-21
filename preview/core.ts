@@ -4,6 +4,9 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+/** Dialogs open in the page in the preview, not in windows of their own. */
+export const isTauri = () => false;
+
 export class Channel<T> {
   onmessage: (m: T) => void = () => {};
 }
@@ -31,6 +34,9 @@ const sess = (name: string, folder: string, protocol: Args, extra: Args = {}) =>
 });
 
 const empty = new URLSearchParams(location.search).has("empty");
+const vault = { enabled: new URLSearchParams(location.search).has("locked"), unlocked: false };
+let vaultPassphrase = "preview passphrase";
+let linkHandler = false;
 
 const db = {
   sessions: empty
@@ -65,13 +71,15 @@ const db = {
     logDirectory: "",
     reconnectOnEnter: true,
     showCommandBar: false,
-    showButtonBar: true,
+    showButtonBar: false,
     sidebarWidth: 260,
     gpuRendering: false,
     restoreWorkspace: true,
     showToolbar: true,
     showSidebar: true,
     showStatusBar: true,
+    // A first-run library (?empty) shows the master passphrase offer.
+    vaultOffered: !empty,
   } as Args,
   bars: [
     {
@@ -240,17 +248,51 @@ const handlers: Record<string, (a: Args) => unknown> = {
     db.workspace = workspace;
     localStorage.setItem("preview.workspace", JSON.stringify(workspace));
   },
-  secret_status: ({ id }) => ({ password: !!db.secrets.get(id)?.has("password"), passphrase: false, enable: !!db.secrets.get(id)?.has("enable") }),
+  secret_status: ({ id }) => ({ password: !!db.secrets.get(id)?.has("password"), passphrase: false, enable: !!db.secrets.get(id)?.has("enable"), locked: vault.enabled && !vault.unlocked }),
   set_secret: ({ id, kind }) => {
     if (!db.secrets.has(id)) db.secrets.set(id, new Set());
     db.secrets.get(id)!.add(kind);
   },
   forget_secrets: ({ id }) => void db.secrets.delete(id),
+  // ?locked starts with a master passphrase set ("preview passphrase") and locked.
+  take_launch_targets: () => [],
+  set_jump_list: () => undefined,
+  link_handler_status: () => linkHandler,
+  set_link_handler: ({ on }) => void (linkHandler = on),
+  open_default_apps: () => undefined,
+  vault_status: () => ({ ...vault }),
+  vault_unlock: ({ passphrase }) => {
+    if (passphrase !== vaultPassphrase) throw { code: "BAD_PASSPHRASE", message: "That isn't the master passphrase." };
+    vault.unlocked = true;
+  },
+  vault_enable: ({ passphrase }) => {
+    vaultPassphrase = passphrase;
+    Object.assign(vault, { enabled: true, unlocked: true });
+  },
+  vault_change: ({ current, passphrase }) => {
+    if (current !== vaultPassphrase) throw { code: "BAD_PASSPHRASE", message: "That isn't the master passphrase." };
+    vaultPassphrase = passphrase;
+  },
+  vault_disable: ({ current }) => {
+    if (current !== vaultPassphrase) throw { code: "BAD_PASSPHRASE", message: "That isn't the master passphrase." };
+    Object.assign(vault, { enabled: false, unlocked: false });
+  },
+  vault_reset: () => {
+    Object.assign(vault, { enabled: false, unlocked: false });
+    db.secrets.clear();
+  },
   import_securecrt: () => ({ sessions: [sess("imported-sw1", "Imported/Branch", ssh("192.168.50.2"))], skipped: [] }),
   list_serial_ports: () => [{ name: "/dev/ttyUSB0", description: "FTDI FT232R USB UART" }],
   default_shell: () => "/bin/bash",
+  list_shells: () => [
+    { name: "bash", command: "/bin/bash" },
+    { name: "zsh", command: "/usr/bin/zsh" },
+    { name: "fish", command: "/usr/bin/fish" },
+  ],
   open_folder: () => undefined,
   data_dir: () => "/home/admin/.config/Tether",
+  window_ready: () => undefined,
+  set_title_bar_colors: () => undefined,
   trust_host_key: ({ host }) => void db.trusted.add(host),
   connect,
   write: ({ connId, data }) => {

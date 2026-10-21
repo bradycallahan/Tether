@@ -120,6 +120,8 @@ export interface Settings {
   showToolbar: boolean;
   showSidebar: boolean;
   showStatusBar: boolean;
+  /** The master passphrase has been offered once (first run). */
+  vaultOffered: boolean;
 }
 
 export interface WorkspaceTab {
@@ -143,6 +145,9 @@ export interface StatusEvent {
   message: string;
 }
 
+/** Something the command line or a link asked Tether to open (launch.rs). */
+export type LaunchTarget = { kind: "session" | "url" | "command"; value: string };
+
 export interface CmdError {
   code: string;
   message: string;
@@ -152,6 +157,12 @@ export interface CmdError {
 export interface PortInfo {
   name: string;
   description: string;
+}
+
+/** A shell found on this machine. `command` goes in a session's `shell`. */
+export interface ShellInfo {
+  name: string;
+  command: string;
 }
 
 export interface ImportReport {

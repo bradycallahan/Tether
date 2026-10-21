@@ -1,20 +1,24 @@
 import "./styles.css";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
+import { findSession, parseLink, savedFor } from "./quickconnect";
 import { api } from "./api";
 import { commands, isMac, type Command } from "./commands";
 import { clear, h, icon } from "./dom";
-import { alertDialog, confirmDialog, modal, promptText, toast } from "./dialogs";
-import { editButton, editButtonBars, editHighlights, editSession, editSettings, quickConnectDialog, type SessionEditResult, type SettingsPage } from "./editors";
+import { confirmDialog, promptText, toast } from "./dialogs";
+import { dialogRequest, followDialogChanges, inWindow, runDialogWindow } from "./dialogwin";
+import { importSecureCrt, runDialog, type DialogRequest, type SessionEditResult, type SettingsPage } from "./editors";
 import { aboutDialog, referenceDialog, shortcutsDialog } from "./help";
-import { cmd, menuOpen, showMenu, type MenuEntry, type MenuItem } from "./menu";
+import { closeMenus, cmd, menuOpen, menuPoint, showMenu, type MenuEntry, type MenuItem } from "./menu";
 import { MenuBar, Toolbar, type MenuDef } from "./menubar";
 import { Omnibox } from "./omnibox";
 import { draggedSessionIds, isSessionDrag, quickSession, Sidebar } from "./sidebar";
 import { folderName, isUnder, joinFolder, store } from "./state";
 import { TabManager, type Tab, type TabState } from "./tabs";
-import { hostLabel, newSession, PROTOCOL_NAMES, type Protocol, type Session, type Settings } from "./types";
+import { hostLabel, newSession, PROTOCOL_NAMES, type LaunchTarget, type ButtonBar, type HighlightSet, type Protocol, type Session, type Settings, type ShellInfo } from "./types";
 import { Welcome } from "./welcome";
+import { guardWebview, setWindowTheme } from "./platform";
+import { offerAtFirstRun, unlockAtStartup } from "./vault";
 
 const MANY_TABS = 8;
 
@@ -30,14 +34,19 @@ class App {
   barButtons!: HTMLElement;
   buttonBarEl!: HTMLElement;
   cmdBar!: HTMLElement;
-  cmdInput!: HTMLInputElement;
+  cmdInput!: HTMLTextAreaElement;
   cmdTarget!: HTMLButtonElement;
   statusEl!: HTMLElement;
   uptimeEl: HTMLElement | null = null;
   currentBar: string | null = null;
   history: string[] = [];
+  /** Always on top lasts until Tether closes, like SecureCRT's. */
+  private onTop = false;
+  /** Shells found on this machine, default first; filled in shortly after startup. */
+  shells: ShellInfo[] = [];
   historyPos = -1;
   private uptimeTimer: number | undefined;
+  private windowTitle = "";
   private lastActive: Tab | null = null;
   /** True until the last workspace has been read back, so startup doesn't overwrite it. */
   private restoring = true;
@@ -58,17 +67,42 @@ class App {
     store.on("highlights", () => this.tabs.tabs.forEach((t) => t.applyHighlightSet()));
     store.on("bars", () => this.renderBars());
     store.on("sessions", () => this.refresh());
+    // The taskbar jump list follows recent sessions (and their names).
+    let jumpTimer: number | undefined;
+    const jump = () => {
+      clearTimeout(jumpTimer);
+      jumpTimer = window.setTimeout(() => this.updateJumpList(), 500);
+    };    store.on("recent", jump);
+    store.on("sessions", jump);
+    jump();
+    followDialogChanges();
     matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => this.applyTheme());
     addEventListener("keydown", (e) => this.shortcut(e), true);
+    if (!isMac) this.altTapsMenuBar();
+    guardWebview();
     addEventListener("focus", () => this.tabs.active?.tabEl.classList.remove("unread"));
+    // Saved passwords must be unlocked before restored tabs connect with them.
+    if ((await api.vaultStatus().catch(() => undefined))?.enabled) {
+      await api.windowReady().catch(() => {});
+      await unlockAtStartup();
+    }
     this.restoreWorkspace();
+    // A jump-list entry, shortcut or ssh:// link Tether was started with; later
+    // ones arrive from a second launch, which hands them over and exits.
+    api.takeLaunchTargets().then((t) => this.openTargets(t)).catch(() => {});
+    listen<LaunchTarget[]>("open-targets", (e) => this.openTargets(e.payload)).catch(() => {});
     this.guardClose();
+    store.shells().then((list) => (this.shells = list));
+    // The window starts hidden; show it once this first frame has painted.
+    requestAnimationFrame(() => requestAnimationFrame(() => api.windowReady().catch(() => {})));
+    setTimeout(() => offerAtFirstRun(), 400);
   }
 
   applyTheme() {
     const pref = store.settings.uiTheme;
     const light = pref === "light" || (pref === "system" && matchMedia("(prefers-color-scheme: light)").matches);
     document.documentElement.dataset.theme = light ? "light" : "dark";
+    setWindowTheme(pref === "system" ? null : pref);
     this.root.style.setProperty("--sidebar-w", `${store.settings.sidebarWidth}px`);
   }
 
@@ -107,11 +141,11 @@ class App {
       { id: "log.toggle", label: "Log session", icon: "log", detail: "Log this tab to a file", keys: ["Mod+Shift+L"], enabled: connected, checked: () => !!active()?.logPath, run: () => active()?.toggleLogging() },
       { id: "log.openFolder", label: "Open log folder", run: () => api.openFolder("logs") },
       { id: "import.securecrt", label: "Import from SecureCRT…", icon: "import", run: () => this.importSecureCrt() },
-      { id: "tab.close", label: "Close tab", keys: ["Mod+Shift+W"], macKeys: ["Meta+W"], enabled: has, run: () => active() && this.tabs.close(active()!) },
+      { id: "tab.close", label: "Close tab", keys: ["Mod+Shift+W", "Ctrl+F4"], macKeys: ["Meta+W"], enabled: has, run: () => active() && this.tabs.close(active()!) },
       { id: "app.quit", label: isMac ? "Quit Tether" : "Exit", run: () => getCurrentWindow().close() },
       // Edit
-      { id: "edit.copy", label: "Copy", icon: "copy", keys: ["Mod+Shift+C"], macKeys: ["Meta+C"], enabled: () => !!active()?.term.hasSelection(), run: () => active()?.copySelection() },
-      { id: "edit.paste", label: "Paste", icon: "paste", keys: ["Mod+Shift+V"], macKeys: ["Meta+V"], enabled: has, run: () => active()?.pasteFromClipboard() },
+      { id: "edit.copy", label: "Copy", icon: "copy", keys: ["Mod+Shift+C", "Ctrl+Insert"], macKeys: ["Meta+C"], enabled: () => !!active()?.term.hasSelection(), run: () => active()?.copySelection() },
+      { id: "edit.paste", label: "Paste", icon: "paste", keys: ["Mod+Shift+V", "Shift+Insert"], macKeys: ["Meta+V"], enabled: has, run: () => active()?.pasteFromClipboard() },
       { id: "edit.selectAll", label: "Select all", keys: ["Mod+Shift+A"], macKeys: ["Meta+A"], enabled: has, run: () => active()?.term.selectAll() },
       { id: "edit.find", label: "Find…", icon: "search", detail: "Find in scrollback", keys: ["Mod+Shift+F"], macKeys: ["Meta+F"], enabled: has, run: () => active()?.openFind() },
       { id: "edit.clear", label: "Clear scrollback", icon: "eraser", macKeys: ["Meta+K"], enabled: has, run: () => active()?.clearScrollback() },
@@ -124,6 +158,7 @@ class App {
       { id: "view.cmdBar", label: "Command window", icon: "command", detail: "Compose a command before sending it", keys: ["Mod+Shift+O"], checked: shown("showCommandBar"), run: () => this.toggleCmdBar() },
       { id: "view.statusBar", label: "Status bar", checked: shown("showStatusBar"), run: toggle("showStatusBar") },
       { id: "view.tile", label: "Tile tabs", icon: "tile", detail: "Show every tab at once", keys: ["Mod+Shift+G"], enabled: () => this.tabs.tabs.length > 1 || this.tabs.tiled, checked: () => this.tabs.tiled, run: () => this.toggleTile() },
+      { id: "view.onTop", label: "Always on top", detail: "Keep Tether above other windows", checked: () => this.onTop, run: () => this.toggleOnTop() },
       { id: "view.fullscreen", label: "Full screen", icon: "fullscreen", keys: ["F11"], macKeys: ["Ctrl+Meta+F"], run: () => this.toggleFullscreen() },
       { id: "view.zoomIn", label: "Bigger text", keys: ["Mod+=", "Mod++"], run: () => this.zoom(1) },
       { id: "view.zoomOut", label: "Smaller text", keys: ["Mod+-"], run: () => this.zoom(-1) },
@@ -182,6 +217,7 @@ class App {
         items: () => [
           cmd("session.new"), cmd("folder.new"), "-",
           cmd("connect.focus"), cmd("connect.quick"), cmd("connect.serial"), cmd("connect.local"),
+          ...this.shellMenu(),
           { label: "Recent sessions", icon: "clock", submenu: this.recentMenu() }, "-",
           cmd("tab.reconnect"), cmd("tab.disconnect"), cmd("tab.reconnectAll"), cmd("tab.disconnectAll"), "-",
           cmd("log.toggle"), cmd("log.openFolder"), "-",
@@ -197,7 +233,7 @@ class App {
         label: "View",
         items: () => [
           cmd("view.sidebar"), cmd("view.toolbar"), cmd("view.buttonBar"), cmd("view.cmdBar"), cmd("view.statusBar"), "-",
-          cmd("view.tile"), cmd("view.fullscreen"), "-",
+          cmd("view.tile"), cmd("view.onTop"), cmd("view.fullscreen"), "-",
           cmd("view.zoomIn"), cmd("view.zoomOut"), cmd("view.zoomReset"), "-",
           { label: "Theme", submenu: [cmd("view.theme.system"), cmd("view.theme.dark"), cmd("view.theme.light")] },
         ],
@@ -243,6 +279,12 @@ class App {
       group("Finding things", ["tools.palette", "view.findSession", "view.sidebar"]),
       group("Settings and help", ["session.options", "tools.settings", "help."]),
     ];
+  }
+
+  /** "Other shells ▸" with every shell found here, once there's more than one. */
+  shellMenu(): MenuItem[] {
+    if (this.shells.length < 2) return [];
+    return [{ label: "Other shells", icon: "terminal", submenu: this.shells.map((sh): MenuItem => ({ label: sh.name, action: () => this.openLocal(sh) })) }];
   }
 
   recentMenu(): MenuItem[] {
@@ -321,7 +363,8 @@ class App {
     this.setupSessionDrop(strip);
 
     // Command window
-    this.cmdInput = h("input", { type: "text", placeholder: "Type a command and press Enter. Escapes like \\r and ^C work. Up and Down recall history.", spellcheck: "false", "aria-label": "Command window" });
+    this.cmdInput = h("textarea", { rows: 1, placeholder: "Type a command, then Enter. Ctrl+Enter adds a line, Up recalls history, escapes like \\r and ^C work.", spellcheck: "false", "aria-label": "Command window" });
+    this.cmdInput.addEventListener("input", () => this.fitCmdInput());
     this.cmdTarget = h("button", { type: "button", class: "target", title: "Click to switch between this tab and broadcasting to checked tabs", onclick: () => this.toggleBroadcast(false) });
     this.cmdInput.addEventListener("keydown", (e) => this.cmdKey(e));
     this.cmdBar = h("div", { class: "cmdbar" },
@@ -444,12 +487,13 @@ class App {
       const btn = h("button", {
         type: "button",
         class: "sbtn",
-        title: `Sends ${b.send}`,
-        onclick: () => this.tabs.sendString(b.send),
+        title: `Sends ${b.send}\nShift+click sends it to every connected tab`,
+        onclick: (e: MouseEvent) => this.tabs.sendString(b.send, e.shiftKey),
         onpointerdown: (e: Event) => e.preventDefault(),
         oncontextmenu: (e: MouseEvent) => {
           e.preventDefault();
-          this.barMenu(e.clientX, e.clientY, i);
+          const at = menuPoint(e);
+          this.barMenu(at.x, at.y, i);
         },
       }, b.label || b.send);
       if (b.color) btn.style.setProperty("--btn-color", b.color);
@@ -505,7 +549,7 @@ class App {
   }
 
   async editOneButton(index: number | null) {
-    const bars = await editButton(this.currentBar ?? store.bars[0]?.name ?? "My buttons", index);
+    const bars = await dialog<ButtonBar[]>({ kind: "button", bar: this.currentBar ?? store.bars[0]?.name ?? "My buttons", index });
     if (bars) {
       await store.saveBars(bars);
       if (!this.currentBar) this.currentBar = bars[0]?.name ?? null;
@@ -515,13 +559,13 @@ class App {
   }
 
   async editBars() {
-    const bars = await editButtonBars(this.currentBar ?? undefined);
+    const bars = await dialog<ButtonBar[]>({ kind: "bars", bar: this.currentBar ?? undefined });
     if (bars) await store.saveBars(bars);
     this.focusTerminal();
   }
 
   async editHl() {
-    const sets = await editHighlights();
+    const sets = await dialog<HighlightSet[]>({ kind: "highlights" });
     if (sets) await store.saveHighlights(sets);
   }
 
@@ -540,19 +584,37 @@ class App {
     if (v.trim() && this.history[0] !== v) this.history.unshift(v);
     this.history.length = Math.min(this.history.length, 200);
     this.historyPos = -1;
-    const hasEnter = /\\[rn]$/.test(v);
-    this.tabs.sendString(hasEnter ? v : v + "\\r").then(() => this.cmdInput.focus());
-    this.cmdInput.value = "";
+    // Each line of a multi-line command is sent with its own Enter.
+    const text = v.replace(/\r?\n/g, "\\r");
+    const hasEnter = /\\[rn]$/.test(text);
+    this.tabs.sendString(hasEnter ? text : text + "\\r").then(() => this.cmdInput.focus());
+    this.setCmdInput("");
+  }
+
+  private setCmdInput(v: string) {
+    this.cmdInput.value = v;
+    this.fitCmdInput();
+  }
+
+  /** Grow with the text, up to six lines. */
+  private fitCmdInput() {
+    const lines = Math.min(6, this.cmdInput.value.split("\n").length);
+    this.cmdInput.rows = lines;
   }
 
   cmdKey(e: KeyboardEvent) {
-    if (e.key === "Enter") {
+    const el = this.cmdInput;
+    const multiline = el.value.includes("\n");
+    if (e.key === "Enter" && (e.ctrlKey || e.shiftKey)) {
+      el.setRangeText("\n", el.selectionStart, el.selectionEnd, "end");
+      this.fitCmdInput();
+    } else if (e.key === "Enter" && !e.altKey && !e.metaKey) {
       this.sendCmd();
-    } else if (e.key === "ArrowUp") {
-      if (this.historyPos < this.history.length - 1) this.cmdInput.value = this.history[++this.historyPos];
-    } else if (e.key === "ArrowDown") {
+    } else if (e.key === "ArrowUp" && (!multiline || el.selectionStart === 0)) {
+      if (this.historyPos < this.history.length - 1) this.setCmdInput(this.history[++this.historyPos]);
+    } else if (e.key === "ArrowDown" && (!multiline || el.selectionStart === el.value.length)) {
       this.historyPos = Math.max(-1, this.historyPos - 1);
-      this.cmdInput.value = this.historyPos >= 0 ? this.history[this.historyPos] : "";
+      this.setCmdInput(this.historyPos >= 0 ? this.history[this.historyPos] : "");
     } else if (e.key === "Escape") {
       this.focusTerminal();
     } else return;
@@ -605,7 +667,7 @@ class App {
     const live = this.tabs.tabs.filter((x) => x.state === "connected").length;
     if (!t) {
       this.statusEl.append(h("span", { class: "seg" }, `${store.sessions.length} saved session${store.sessions.length === 1 ? "" : "s"}`));
-      getCurrentWindow().setTitle("Tether").catch(() => {});
+      this.setWindowTitle("Tether");
       return;
     }
     const stateClass = t.state === "connected" ? "on" : t.state === "connecting" ? "warn" : t.state === "closed" ? "bad" : "";
@@ -623,7 +685,16 @@ class App {
       h("span", { class: "seg dim", title: "Columns × rows" }, `${t.term.cols}×${t.term.rows}`),
     ];
     this.statusEl.append(...segs.filter((x): x is HTMLElement => !!x));
-    getCurrentWindow().setTitle(`${t.title} — Tether`).catch(() => {});
+    // Like SecureCRT, the title says when the tab in front isn't connected,
+    // so it shows on the taskbar and in Alt+Tab too.
+    const state = t.state === "connected" ? "" : t.state === "connecting" ? " (Connecting)" : " (Not connected)";
+    this.setWindowTitle(`${t.title}${state} - Tether`);
+  }
+
+  setWindowTitle(title: string) {
+    if (title === this.windowTitle) return;
+    this.windowTitle = title;
+    getCurrentWindow().setTitle(title).catch(() => {});
   }
 
   /** The connected-for clock runs only while a connected tab is in front. */
@@ -708,6 +779,34 @@ class App {
   // ---------------------------------------------------------------------------
   // Sessions
 
+  updateJumpList() {
+    const recent = store.recentSessions().slice(0, 10);
+    api.setJumpList(recent.map((s) => ({ id: s.id, name: s.name, detail: `${PROTOCOL_NAMES[s.protocol.kind]} ${hostLabel(s.protocol)}` }))).catch(() => {});
+  }
+
+  openTargets(list: LaunchTarget[]) {
+    for (const t of list) {
+      if (t.kind === "command") {
+        commands.run(t.value);
+        continue;
+      }
+      if (t.kind === "session") {
+        const s = findSession(t.value, store.sessions);
+        if (s) this.openSessions([s]);
+        else toast(`There's no saved session called ${t.value}.`);
+        continue;
+      }
+      const p = parseLink(t.value);
+      if (!p) {
+        toast(`Tether can't open ${t.value.slice(0, 80)}: it isn't a valid ssh:// or telnet:// address.`);
+        continue;
+      }
+      const saved = savedFor(p, store.sessions);
+      if (saved) this.openSessions([saved]);
+      else this.tabs.open(quickSession(p), false);
+    }
+  }
+
   async openSessions(list: Session[], opts: { tile?: boolean } = {}) {
     if (!list.length) return;
     if (list.length > MANY_TABS) {
@@ -728,13 +827,13 @@ class App {
   async saveEdited(r: SessionEditResult) {
     await store.saveSession(r.session);
     for (const [kind, value] of Object.entries(r.secrets)) {
-      await api.setSecret(r.session.id, kind as keyof SessionEditResult["secrets"], value).catch((e) => toast(e?.message ?? "Couldn't save to the system keychain."));
+      await api.setSecret(r.session.id, kind as keyof SessionEditResult["secrets"], value).catch((e) => toast(e?.message ?? "Couldn't save the password."));
     }
     for (const t of this.tabs.tabs) if (t.saved && t.session.id === r.session.id) t.updateSession(r.session);
   }
 
   async create(folder: string, base?: Session) {
-    const r = await editSession(base ? { ...base, folder } : newSession({ folder }), { isNew: true });
+    const r = await dialog<SessionEditResult>({ kind: "session", session: base ? { ...base, folder } : newSession({ folder }), isNew: true });
     if (!r) return this.focusTerminal();
     await this.saveEdited(r);
     this.sidebar.reveal(r.session.id);
@@ -742,7 +841,7 @@ class App {
   }
 
   async edit(s: Session) {
-    const r = await editSession(s, { isNew: false });
+    const r = await dialog<SessionEditResult>({ kind: "session", session: s, isNew: false });
     if (!r) return;
     await this.saveEdited(r);
     if (r.connect) this.openSessions([r.session]);
@@ -750,7 +849,7 @@ class App {
 
   async editFromTab(tab: Tab, page?: "login") {
     const existing = tab.saved ? store.session(tab.session.id) : undefined;
-    const r = await editSession(existing ?? tab.session, { isNew: !existing, page });
+    const r = await dialog<SessionEditResult>({ kind: "session", session: existing ?? tab.session, isNew: !existing, page });
     if (!r) return this.focusTerminal();
     await this.saveEdited(r);
     tab.updateSession(r.session);
@@ -768,7 +867,7 @@ class App {
 
   async duplicate(s: Session) {
     const copy = { ...structuredClone(s), id: crypto.randomUUID(), name: `${s.name} copy` };
-    const r = await editSession(copy, { isNew: true });
+    const r = await dialog<SessionEditResult>({ kind: "session", session: copy, isNew: true });
     if (!r) return;
     await this.saveEdited(r);
     this.sidebar.reveal(r.session.id);
@@ -819,12 +918,13 @@ class App {
     await store.deleteFolder(path);
   }
 
-  async openLocal() {
-    this.tabs.open(newSession({ name: "Local shell", protocol: { kind: "local", shell: "" } }), false);
+  openLocal(shell?: ShellInfo) {
+    const name = shell?.name ?? this.shells[0]?.name ?? "Local shell";
+    this.tabs.open(newSession({ name, protocol: { kind: "local", shell: shell?.command ?? "" } }), false);
   }
 
   async quickConnect(kind?: Protocol["kind"]) {
-    const r = await quickConnectDialog(kind);
+    const r = await dialog<{ session: Session; save: boolean }>({ kind: "quick", protocol: kind });
     if (!r) return this.focusTerminal();
     if (r.save) {
       await store.saveSession(r.session);
@@ -836,62 +936,13 @@ class App {
   }
 
   async openSettings(page?: SettingsPage) {
-    const s = await editSettings(
-      {
-        importSecureCrt: () => this.importSecureCrt(),
-        editBars: () => this.editBars(),
-        editHighlights: () => this.editHl(),
-      },
-      page,
-    );
+    const s = await dialog<Settings>({ kind: "settings", page });
     if (s) await store.saveSettings(s);
     this.focusTerminal();
   }
 
-  async importSecureCrt() {
-    const proceed = await confirmDialog({
-      title: "Import SecureCRT sessions",
-      message: h("span", {},
-        "Choose SecureCRT's Sessions folder. On Windows it's usually ",
-        h("span", { class: "mono" }, "%APPDATA%\\VanDyke\\Config\\Sessions"),
-        ", and on macOS ",
-        h("span", { class: "mono" }, "~/Library/Application Support/VanDyke/SecureCRT/Config/Sessions"),
-        ". Hosts, ports, usernames, serial settings and folders come across; saved passwords don't."),
-      confirm: "Choose folder…",
-    });
-    if (!proceed) return;
-    const dir = await openDialog({ directory: true, multiple: false, title: "SecureCRT Sessions folder" });
-    if (typeof dir !== "string") return;
-    try {
-      const report = await api.importSecureCrt(dir);
-      if (!report.sessions.length) {
-        await alertDialog("Nothing to import", report.skipped.length ? `Skipped ${report.skipped.length} file(s) with unsupported protocols.` : "No session files were found in that folder. Make sure it's the Sessions folder itself.");
-        return;
-      }
-      const existing = new Set(store.sessions.map((s) => `${s.folder}/${s.name}`.toLowerCase()));
-      const fresh = report.sessions.filter((s) => !existing.has(`${s.folder}/${s.name}`.toLowerCase()));
-      const dupes = report.sessions.length - fresh.length;
-      if (!fresh.length) {
-        await alertDialog("Already imported", `All ${report.sessions.length} sessions in that folder are already in your library.`);
-        return;
-      }
-      const ok = await modal<boolean>((done) => ({
-        title: `Import ${fresh.length} session${fresh.length === 1 ? "" : "s"}?`,
-        body: h("div", { class: "callout" },
-          h("div", {}, `${report.sessions.length} found.`),
-          dupes ? h("div", {}, `${dupes} already exist with the same name and folder and will be left alone.`) : null,
-          report.skipped.length ? h("div", {}, `${report.skipped.length} skipped (unsupported protocols such as TAPI or RLogin).`) : null,
-        ),
-        foot: [h("button", { type: "button", class: "btn", onclick: () => done(false) }, "Cancel"), h("button", { type: "submit", class: "btn primary" }, `Import ${fresh.length}`)],
-        onSubmit: () => done(true),
-      }));
-      if (ok) {
-        await store.saveSessions(fresh);
-        toast(`Imported ${fresh.length} session${fresh.length === 1 ? "" : "s"}`);
-      }
-    } catch (e) {
-      await alertDialog("Import failed", (e as { message?: string }).message ?? String(e));
-    }
+  importSecureCrt() {
+    return importSecureCrt();
   }
 
   // ---------------------------------------------------------------------------
@@ -904,6 +955,7 @@ class App {
       cmd("connect.quick"),
       cmd("connect.serial"),
       cmd("connect.local"),
+      ...this.shellMenu(),
       ...(recent.length ? (["-"] as MenuEntry[]) : []),
       ...recent.map((s): MenuItem => ({ label: s.name, hint: hostLabel(s.protocol), action: () => this.openSessions([s]) })),
     ]);
@@ -964,6 +1016,12 @@ class App {
   toggleTile() {
     this.tabs.setTiled(!this.tabs.tiled);
     this.focusTerminal();
+  }
+
+  toggleOnTop() {
+    this.onTop = !this.onTop;
+    getCurrentWindow().setAlwaysOnTop(this.onTop).catch(() => toast("Couldn't keep the window on top."));
+    this.refresh();
   }
 
   async toggleFullscreen() {
@@ -1042,6 +1100,29 @@ class App {
   // ---------------------------------------------------------------------------
   // Keyboard
 
+  /**
+   * Pressing and releasing Alt on its own moves to the menu bar (and back),
+   * as in any Windows app. Alt used with another key or a click is Meta for
+   * the device, so it doesn't count.
+   */
+  altTapsMenuBar() {
+    let alone = false;
+    addEventListener("keydown", (e) => {
+      alone = e.key === "Alt" && !e.ctrlKey && !e.shiftKey && !e.metaKey && (alone || !e.repeat);
+    }, true);
+    addEventListener("pointerdown", () => (alone = false), true);
+    addEventListener("blur", () => (alone = false));
+    addEventListener("keyup", (e) => {
+      if (e.key !== "Alt" || !alone) return;
+      alone = false;
+      if (document.querySelector("dialog[open]")) return;
+      e.preventDefault();
+      if (menuOpen()) closeMenus();
+      if (this.menubar.hasFocus()) this.focusTerminal();
+      else this.menubar.focus();
+    }, true);
+  }
+
   shortcut(e: KeyboardEvent) {
     if (document.querySelector("dialog[open]") || menuOpen()) return;
     if (e.key === "F10" && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
@@ -1101,7 +1182,13 @@ function subsequence(hay: string, w: string): boolean {
   return i === w.length;
 }
 
-new App().start().catch((e) => {
+/** Show an options dialog in its own window and wait for its result. */
+function dialog<T>(req: DialogRequest): Promise<T | undefined> {
+  return inWindow(req, () => runDialog(req) as Promise<T | undefined>);
+}
+
+const request = dialogRequest<DialogRequest>();
+(request ? runDialogWindow(request, runDialog) : new App().start()).catch((e) => {
   document.body.textContent = `Tether couldn't start: ${e?.message ?? e}`;
   console.error(e);
 });

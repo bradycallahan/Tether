@@ -1,5 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
-import type { ButtonBar, HighlightSet, ImportReport, PortInfo, SecretKind, Session, Settings, StatusEvent, Workspace } from "./types";
+import type { ButtonBar, HighlightSet, ImportReport, LaunchTarget, PortInfo, SecretKind, Session, Settings, ShellInfo, StatusEvent, Workspace } from "./types";
 
 export const api = {
   listSessions: () => invoke<Session[]>("list_sessions"),
@@ -16,15 +16,29 @@ export const api = {
   saveFolders: (folders: string[]) => invoke<void>("save_folders", { folders }),
   getWorkspace: () => invoke<Workspace>("get_workspace"),
   saveWorkspace: (workspace: Workspace) => invoke<void>("save_workspace", { workspace }),
-  secretStatus: (id: string) => invoke<Record<SecretKind, boolean>>("secret_status", { id }),
+  secretStatus: (id: string) => invoke<Record<SecretKind | "locked", boolean>>("secret_status", { id }),
   /** An empty value removes the secret. */
   setSecret: (id: string, kind: SecretKind, value: string) => invoke<void>("set_secret", { id, kind, value }),
   forgetSecrets: (id: string) => invoke<void>("forget_secrets", { id }),
+  setJumpList: (entries: { id: string; name: string; detail: string }[]) => invoke<void>("set_jump_list", { entries }),
+  takeLaunchTargets: () => invoke<LaunchTarget[]>("take_launch_targets"),
+  linkHandlerStatus: () => invoke<boolean | null>("link_handler_status"),
+  setLinkHandler: (on: boolean) => invoke<void>("set_link_handler", { on }),
+  openDefaultApps: () => invoke<void>("open_default_apps"),
+  vaultStatus: () => invoke<{ enabled: boolean; unlocked: boolean }>("vault_status"),
+  vaultUnlock: (passphrase: string) => invoke<void>("vault_unlock", { passphrase }),
+  vaultEnable: (passphrase: string) => invoke<void>("vault_enable", { passphrase }),
+  vaultChange: (current: string, passphrase: string) => invoke<void>("vault_change", { current, passphrase }),
+  vaultDisable: (current: string) => invoke<void>("vault_disable", { current }),
+  vaultReset: () => invoke<void>("vault_reset"),
   importSecureCrt: (path: string) => invoke<ImportReport>("import_securecrt", { path }),
   listSerialPorts: () => invoke<PortInfo[]>("list_serial_ports"),
   defaultShell: () => invoke<string>("default_shell"),
+  listShells: () => invoke<ShellInfo[]>("list_shells"),
   openFolder: (which: "logs" | "data") => invoke<void>("open_folder", { which }),
   dataDir: () => invoke<string>("data_dir"),
+  windowReady: () => invoke<void>("window_ready"),
+  setTitleBarColors: (caption: string, text: string) => invoke<void>("set_title_bar_colors", { caption, text }),
   trustHostKey: (host: string, port: number, key: string, replace: boolean) =>
     invoke<void>("trust_host_key", { host, port, key, replace }),
 

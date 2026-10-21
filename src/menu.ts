@@ -63,6 +63,18 @@ export function openMenu(entries: MenuEntry[], at: { x: number; y: number } | DO
   else el.focus();
 }
 
+/** True for a context menu asked for with the Menu key or Shift+F10 rather than a right-click. */
+export function fromKeyboard(e: MouseEvent): boolean {
+  return e.button !== 2;
+}
+
+/** Where a context menu opens: at the pointer, or under the focused element when opened from the keyboard. */
+export function menuPoint(e: MouseEvent): { x: number; y: number } {
+  if (!fromKeyboard(e) || !(e.target instanceof Element)) return { x: e.clientX, y: e.clientY };
+  const r = e.target.getBoundingClientRect();
+  return { x: r.left + Math.min(24, r.width / 2), y: r.bottom };
+}
+
 /** Right-click menu at the pointer. */
 export function showMenu(x: number, y: number, entries: MenuEntry[]) {
   openMenu(entries, { x, y }, { focusFirst: false });

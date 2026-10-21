@@ -16,6 +16,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-deep-link = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"
@@ -35,6 +37,27 @@ regex = "1"
 dirs = "6"
 parking_lot = "0.12"
 log = "0.4"
+aes-gcm = "0.11"
+argon2 = "0.6"
+getrandom = "0.3"
+zeroize = "1"
+
+# Already part of Tauri on Windows; named here to reach WebView2's settings.
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.39"
+windows-core = "0.62"
+windows-registry = "0.6"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Storage_EnhancedStorage",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
 
 # Small, fast-starting release builds. The terminal's heavy lifting happens in
 # the webview, so optimizing the Rust side for size costs nothing noticeable.

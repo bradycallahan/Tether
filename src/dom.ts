@@ -50,6 +50,7 @@ export function icon(name: keyof typeof ICONS, label?: string): SVGSVGElement {
 
 const S = 'fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"';
 export const ICONS = {
+  lock: `<path ${S} d="M3.5 7.5h9v6h-9zM5.5 7.5V5a2.5 2.5 0 015 0v2.5"/>`,
   plus: `<path ${S} d="M8 3v10M3 8h10"/>`,
   close: `<path ${S} d="M4 4l8 8M12 4l-8 8"/>`,
   gear: `<circle ${S} cx="8" cy="8" r="2.2"/><path ${S} d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/>`,

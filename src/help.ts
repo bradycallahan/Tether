@@ -63,8 +63,8 @@ export async function referenceDialog() {
       h("h3", {}, "Login action tokens"),
       table([
         ["{username}", "The session's SSH username"],
-        ["{password}", "The password saved in the system keychain"],
-        ["{enable}", "The enable password saved in the system keychain"],
+        ["{password}", "The session's saved password"],
+        ["{enable}", "The session's saved enable password"],
       ]),
     ],
     foot: [button("Close", { kind: "primary", submit: true })],
