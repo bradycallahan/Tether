@@ -268,8 +268,14 @@ const handlers: Record<string, (a: Args) => unknown> = {
     vaultPassphrase = passphrase;
     Object.assign(vault, { enabled: true, unlocked: true });
   },
-  vault_change: ({ passphrase }) => void (vaultPassphrase = passphrase),
-  vault_disable: () => void Object.assign(vault, { enabled: false, unlocked: false }),
+  vault_change: ({ current, passphrase }) => {
+    if (current !== vaultPassphrase) throw { code: "BAD_PASSPHRASE", message: "That isn't the master passphrase." };
+    vaultPassphrase = passphrase;
+  },
+  vault_disable: ({ current }) => {
+    if (current !== vaultPassphrase) throw { code: "BAD_PASSPHRASE", message: "That isn't the master passphrase." };
+    Object.assign(vault, { enabled: false, unlocked: false });
+  },
   vault_reset: () => {
     Object.assign(vault, { enabled: false, unlocked: false });
     db.secrets.clear();

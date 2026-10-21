@@ -180,32 +180,35 @@ pub fn enable(passphrase: &str, session_ids: &[String]) -> Result<()> {
 }
 
 /// Remove the master passphrase: move every secret back to the OS store.
-pub fn disable() -> Result<()> {
+/// Ok(false) means `current` is wrong.
+pub fn disable(current: &str) -> Result<bool> {
     let mut guard = STATE.lock();
     let state = guard.as_mut().ok_or_else(|| anyhow!("secrets not initialized"))?;
-    let Some(open) = state.vault.as_ref() else { return Ok(()) };
-    let Some(key) = open.key.as_ref() else { bail!("Unlock saved passwords with your master passphrase first.") };
-    for (n, secret) in open.vault.all(key)? {
+    let Some(open) = state.vault.as_ref() else { return Ok(true) };
+    // Asked again even when unlocked: an unattended, unlocked Tether mustn't
+    // let anyone strip the protection off.
+    let Some(key) = open.vault.unlock(current)? else { return Ok(false) };
+    for (n, secret) in open.vault.all(&key)? {
         os_entry(&n)?.set_password(&secret)?;
     }
     std::fs::remove_file(state.dir.join(VAULT_FILE))?;
     state.vault = None;
-    Ok(())
+    Ok(true)
 }
 
-/// Re-encrypt every secret under a new passphrase.
-pub fn change(passphrase: &str) -> Result<()> {
+/// Re-encrypt every secret under a new passphrase. Ok(false) means `current` is wrong.
+pub fn change(current: &str, passphrase: &str) -> Result<bool> {
     let mut guard = STATE.lock();
     let state = guard.as_mut().ok_or_else(|| anyhow!("secrets not initialized"))?;
     let Some(open) = state.vault.as_ref() else { bail!("No master passphrase is set.") };
-    let Some(key) = open.key.as_ref() else { bail!("Unlock saved passwords with your master passphrase first.") };
+    let Some(key) = open.vault.unlock(current)? else { return Ok(false) };
     let (mut vault, new_key) = Vault::create(passphrase)?;
-    for (n, secret) in open.vault.all(key)? {
+    for (n, secret) in open.vault.all(&key)? {
         vault.set(&new_key, &n, &secret)?;
     }
     save(state, &vault)?;
     state.vault = Some(Open { vault, key: Some(new_key) });
-    Ok(())
+    Ok(true)
 }
 
 /// Forget a vault whose passphrase is lost. Its secrets are gone; sessions stay.

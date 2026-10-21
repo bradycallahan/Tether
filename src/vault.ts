@@ -27,8 +27,17 @@ export async function unlockAtStartup(): Promise<void> {
   await unlockDialog();
 }
 
-/** Returns true once unlocked. */
-export async function unlockDialog(): Promise<boolean> {
+const WRONG = "That isn't the master passphrase. Check Caps Lock and try again.";
+
+function wrong(e: unknown): string {
+  return (e as { code?: string }).code === "BAD_PASSPHRASE" ? WRONG : message(e);
+}
+
+/**
+ * Returns true once unlocked. At startup the way out is "Skip" (Tether then
+ * asks per connection); from Settings it's a plain "Cancel".
+ */
+export async function unlockDialog(atStartup = true): Promise<boolean> {
   const pass = h("input", { type: "password", autocomplete: "off", "aria-label": "Master passphrase" });
   const error = h("span", { class: "err", role: "alert" });
   const row = h("label", { class: "field" }, h("span", {}, "Master passphrase"), pass, error);
@@ -38,7 +47,7 @@ export async function unlockDialog(): Promise<boolean> {
     intro: "Your saved passwords are encrypted with your master passphrase.",
     body: row,
     footLeft: [button("Forgot it?", { kind: "ghost", onclick: () => done("forgot") })],
-    foot: [button("Skip", { onclick: () => done(undefined) }), unlock],
+    foot: [button(atStartup ? "Skip" : "Cancel", { onclick: () => done(undefined) }), unlock],
     focus: pass,
     onSubmit: async () => {
       if (!pass.value) return;
@@ -49,19 +58,19 @@ export async function unlockDialog(): Promise<boolean> {
         done("unlocked");
       } catch (e) {
         row.classList.add("error");
-        error.textContent = (e as { code?: string }).code === "BAD_PASSPHRASE" ? "That isn't the master passphrase. Check Caps Lock and try again." : message(e);
+        error.textContent = wrong(e);
         pass.select();
       } finally {
         unlock.disabled = false;
       }
     },
   }));
-  if (result === "forgot") return forgot();
-  if (!result) toast("Saved passwords are locked. Tether will ask for passwords as you connect.");
+  if (result === "forgot") return forgot(atStartup);
+  if (!result && atStartup) toast("Saved passwords are locked. Tether will ask for passwords as you connect.");
   return result === "unlocked";
 }
 
-async function forgot(): Promise<boolean> {
+async function forgot(atStartup: boolean): Promise<boolean> {
   const ok = await confirmDialog({
     title: "Remove the master passphrase?",
     message: "There's no way to recover a forgotten passphrase. Removing it deletes the passwords it protects. Your sessions stay, and Tether will ask for each password the next time you connect.",
@@ -69,7 +78,7 @@ async function forgot(): Promise<boolean> {
     cancel: "Try again",
     danger: true,
   });
-  if (!ok) return unlockDialog();
+  if (!ok) return unlockDialog(atStartup);
   await api.vaultReset();
   toast("Master passphrase removed.");
   return false;
@@ -77,9 +86,11 @@ async function forgot(): Promise<boolean> {
 
 /**
  * Ask for a new passphrase twice. `intro` explains why; `skip` is the
- * cancel button's label.
+ * cancel button's label. With `current`, the existing passphrase is asked
+ * first and handed to `apply` as its second argument.
  */
-async function newPassphrase(o: { title: string; intro: string; confirm: string; skip: string; apply: (pass: string) => Promise<void> }): Promise<boolean> {
+async function newPassphrase(o: { title: string; intro: string; confirm: string; skip: string; current?: boolean; apply: (pass: string, current: string) => Promise<void> }): Promise<boolean> {
+  const cur = h("input", { type: "password", autocomplete: "current-password" });
   const pass = h("input", { type: "password", autocomplete: "new-password" });
   const again = h("input", { type: "password", autocomplete: "new-password" });
   const error = h("div", { class: "form-error", role: "alert" });
@@ -88,15 +99,17 @@ async function newPassphrase(o: { title: string; intro: string; confirm: string;
     title: o.title,
     intro: o.intro,
     body: [
-      h("label", { class: "field" }, h("span", {}, "Passphrase"), pass, h("span", { class: "hint" }, `At least ${MIN_LENGTH} characters. A few unrelated words are easy to remember and hard to guess.`)),
+      ...(o.current ? [h("label", { class: "field" }, h("span", {}, "Current passphrase"), cur)] : []),
+      h("label", { class: "field" }, h("span", {}, o.current ? "New passphrase" : "Passphrase"), pass, h("span", { class: "hint" }, `At least ${MIN_LENGTH} characters. A few unrelated words are easy to remember and hard to guess.`)),
       h("label", { class: "field" }, h("span", {}, "Type it again"), again),
       h("div", { class: "callout" }, "If you forget it, the passwords it protects can't be recovered. Your sessions are not affected."),
     ],
     footLeft: [error],
     foot: [button(o.skip, { onclick: () => done(false) }), go],
-    focus: pass,
+    focus: o.current ? cur : pass,
     onSubmit: async () => {
       error.textContent = "";
+      if (o.current && !cur.value) return cur.focus();
       if (pass.value.length < MIN_LENGTH) {
         error.textContent = `Use at least ${MIN_LENGTH} characters.`;
         return pass.focus();
@@ -107,10 +120,42 @@ async function newPassphrase(o: { title: string; intro: string; confirm: string;
       }
       go.disabled = true;
       try {
-        await o.apply(pass.value);
+        await o.apply(pass.value, cur.value);
         done(true);
       } catch (e) {
-        error.textContent = message(e);
+        error.textContent = wrong(e);
+        if ((e as { code?: string }).code === "BAD_PASSPHRASE") cur.select();
+      } finally {
+        go.disabled = false;
+      }
+    },
+  }));
+  return !!ok;
+}
+
+/** Remove the passphrase; the current one is asked again so an unattended Tether can't be stripped of it. */
+async function removeDialog(): Promise<boolean> {
+  const pass = h("input", { type: "password", autocomplete: "current-password", "aria-label": "Current passphrase" });
+  const error = h("span", { class: "err", role: "alert" });
+  const row = h("label", { class: "field" }, h("span", {}, "Current passphrase"), pass, error);
+  const go = button("Remove passphrase", { kind: "danger solid", submit: true });
+  const ok = await modal<boolean>((done) => ({
+    title: "Remove the master passphrase?",
+    intro: `Saved passwords move back to ${osStore()} and Tether stops asking for a passphrase at startup.`,
+    body: row,
+    foot: [button("Cancel", { onclick: () => done(false) }), go],
+    focus: pass,
+    onSubmit: async () => {
+      if (!pass.value) return;
+      go.disabled = true;
+      error.textContent = "";
+      try {
+        await api.vaultDisable(pass.value);
+        done(true);
+      } catch (e) {
+        row.classList.add("error");
+        error.textContent = wrong(e);
+        pass.select();
       } finally {
         go.disabled = false;
       }
@@ -157,30 +202,20 @@ export function securityPanel(): HTMLElement {
     } else if (!st.unlocked) {
       status.textContent = "Saved passwords are encrypted with your master passphrase and are locked right now.";
       actions.append(button("Unlock…", { kind: "primary", onclick: async () => {
-        await unlockDialog();
+        await unlockDialog(false);
         render();
       } }));
     } else {
       status.textContent = "Saved passwords are encrypted with your master passphrase. Tether asks for it when it starts.";
       actions.append(
         button("Change passphrase…", { onclick: async () => {
-          if (await newPassphrase({ title: "Change the master passphrase", intro: "Saved passwords are re-encrypted with the new passphrase.", confirm: "Change passphrase", skip: "Cancel", apply: (p) => api.vaultChange(p) })) toast("Master passphrase changed.");
+          if (await newPassphrase({ title: "Change the master passphrase", intro: "Saved passwords are re-encrypted with the new passphrase.", confirm: "Change passphrase", skip: "Cancel", current: true, apply: (p, current) => api.vaultChange(current, p) })) toast("Master passphrase changed.");
         } }),
         button("Remove passphrase…", { kind: "danger", onclick: async () => {
-          const ok = await confirmDialog({
-            title: "Remove the master passphrase?",
-            message: `Saved passwords move back to ${osStore()} and Tether stops asking for a passphrase at startup.`,
-            confirm: "Remove passphrase",
-            danger: true,
-          });
-          if (!ok) return;
-          try {
-            await api.vaultDisable();
+          if (await removeDialog()) {
             toast("Master passphrase removed.");
-          } catch (e) {
-            toast(message(e));
+            render();
           }
-          render();
         } }),
       );
     }

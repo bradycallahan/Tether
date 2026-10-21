@@ -170,11 +170,7 @@ async fn vault_unlock(passphrase: String) -> CmdResult<()> {
     let ok = tauri::async_runtime::spawn_blocking(move || secrets::unlock(&passphrase))
         .await
         .map_err(|e| CmdError::new("ERROR", e.to_string()))??;
-    if ok {
-        Ok(())
-    } else {
-        Err(CmdError::new("BAD_PASSPHRASE", "That isn't the master passphrase."))
-    }
+    bad_passphrase(ok)
 }
 
 /// Set a master passphrase, moving every saved secret into the encrypted vault.
@@ -187,18 +183,30 @@ async fn vault_enable(state: State<'_, AppState>, passphrase: String) -> CmdResu
     Ok(())
 }
 
+fn bad_passphrase(ok: bool) -> CmdResult<()> {
+    if ok {
+        Ok(())
+    } else {
+        Err(CmdError::new("BAD_PASSPHRASE", "That isn't the master passphrase."))
+    }
+}
+
+/// Change the master passphrase; the current one is asked again.
 #[tauri::command]
-async fn vault_change(passphrase: String) -> CmdResult<()> {
-    tauri::async_runtime::spawn_blocking(move || secrets::change(&passphrase))
+async fn vault_change(current: String, passphrase: String) -> CmdResult<()> {
+    let ok = tauri::async_runtime::spawn_blocking(move || secrets::change(&current, &passphrase))
         .await
         .map_err(|e| CmdError::new("ERROR", e.to_string()))??;
-    Ok(())
+    bad_passphrase(ok)
 }
 
 /// Remove the master passphrase, moving saved secrets back to the system keychain.
 #[tauri::command]
-fn vault_disable() -> CmdResult<()> {
-    Ok(secrets::disable()?)
+async fn vault_disable(current: String) -> CmdResult<()> {
+    let ok = tauri::async_runtime::spawn_blocking(move || secrets::disable(&current))
+        .await
+        .map_err(|e| CmdError::new("ERROR", e.to_string()))??;
+    bad_passphrase(ok)
 }
 
 /// For a forgotten passphrase: drop the vault and the secrets in it.
