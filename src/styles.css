@@ -398,6 +398,7 @@ button.link:hover { text-decoration: underline; }
 .transfer .fill { width: 0; height: 100%; background: var(--cable); }
 .transfer.ok .fill { background: var(--link); }
 .transfer.failed .fill { background: var(--fault); }
+.transfer.cancelled .fill { background: var(--text-dim); }
 .transfer.failed .line { flex-wrap: wrap; }
 .transfer.failed .detail { color: var(--fault); white-space: normal; max-width: none; flex-basis: 100%; }
 .transfer .btn { height: 24px; width: 24px; }

@@ -377,7 +377,7 @@ impl Manager {
             meter.current = base_name(&rpath).to_string();
             if let Err(e) = copy_up(&s, &lpath, &rpath, cancel, &mut meter).await {
                 // Don't leave half a file behind on the device.
-                let _ = s.remove_file(rpath.as_str()).await;
+                let _ = s.remove_file(remote_part(&rpath).as_str()).await;
                 if let Copy::Remote(e) = &e {
                     self.forget_if_dead(conn_id, e).await;
                 }
@@ -401,7 +401,7 @@ impl Manager {
         if !parent.is_empty() && !s.try_exists(parent.as_str()).await.map_err(sftp)? {
             mkdir_all(&s, &parent).await.map_err(sftp)?;
         }
-        let file = s.create(path).await.map_err(sftp)?;
+        let file = s.create(remote_part(path).as_str()).await.map_err(sftp)?;
         let upload = Upload { file, path: path.to_string(), session: s };
         self.streams.lock().insert(id.to_string(), Arc::new(tokio::sync::Mutex::new(upload)));
         Ok(())
@@ -423,11 +423,18 @@ impl Manager {
     pub async fn stream_end(&self, id: &str, ok: bool) -> CmdResult<()> {
         let Some(stream) = self.streams.lock().remove(id) else { return Ok(()) };
         let mut up = stream.lock().await;
-        let r = up.file.shutdown().await;
+        let part = remote_part(&up.path);
+        let r = match up.file.shutdown().await {
+            Ok(()) if ok => put_in_place(&up.session, &part, &up.path)
+                .await
+                .map_err(|e| fail(&format!("upload {}", base_name(&up.path)), &e)),
+            Ok(()) => Ok(()),
+            Err(e) => Err(CmdError::new("SFTP", format!("Couldn't finish the upload: {e}"))),
+        };
         if !ok || r.is_err() {
-            let _ = up.session.remove_file(up.path.as_str()).await;
+            let _ = up.session.remove_file(part.as_str()).await;
         }
-        r.map_err(|e| CmdError::new("SFTP", format!("Couldn't finish the upload: {e}")))
+        r
     }
 }
 
@@ -515,7 +522,10 @@ async fn copy_up<F: Fn(Progress)>(
     meter: &mut Meter<'_, F>,
 ) -> Result<(), Copy> {
     let mut src = tokio::fs::File::open(local).await.map_err(Copy::Local)?;
-    let mut dst = s.create(remote).await.map_err(Copy::Remote)?;
+    // Written under a temporary name so a dropped connection can't leave a truncated file
+    // that looks complete; renamed into place once the device has acknowledged every byte.
+    let part = remote_part(remote);
+    let mut dst = s.create(part.as_str()).await.map_err(Copy::Remote)?;
     let mut buf = vec![0u8; BUF];
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -530,7 +540,16 @@ async fn copy_up<F: Fn(Progress)>(
     }
     // Waits for the device to acknowledge every write.
     dst.shutdown().await.map_err(|e| Copy::Remote(SftpError::IO(e.to_string())))?;
-    Ok(())
+    put_in_place(s, &part, remote).await.map_err(Copy::Remote)
+}
+
+/// Rename a finished upload over its target. SFTP v3 rename refuses to replace an existing
+/// file, and only reaches here once the user agreed to replace it, so the old one goes first.
+async fn put_in_place(s: &SftpSession, part: &str, target: &str) -> Result<(), SftpError> {
+    if s.try_exists(target).await? {
+        s.remove_file(target).await?;
+    }
+    s.rename(part, target).await
 }
 
 async fn mkdir_all(s: &SftpSession, path: &str) -> Result<(), SftpError> {
@@ -634,6 +653,10 @@ pub fn local_name(name: &str) -> Option<String> {
         safe.insert(0, '_');
     }
     Some(safe)
+}
+
+fn remote_part(path: &str) -> String {
+    format!("{path}.part")
 }
 
 fn part_path(p: &Path) -> PathBuf {

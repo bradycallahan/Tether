@@ -115,17 +115,18 @@ class Clashes {
     if (this.sticky) return this.sticky;
     const rest = this.remaining();
     const all = h("input", { type: "checkbox" });
-    const r = await modal<Answer>((done) => ({
-      title: `Replace ${name}?`,
-      intro: `${name} already exists in ${where}.`,
-      body: rest > 0 ? check(`Do the same for the other ${rest} item${rest === 1 ? "" : "s"}`, all) : undefined,
-      foot: [
-        button("Cancel", { onclick: () => done("cancel") }),
-        button("Skip", { onclick: () => done("skip") }),
-        button("Replace", { kind: "primary", submit: true }),
-      ],
-      onSubmit: () => done("replace"),
-    }));
+    // Overwriting a file on the device can't be undone, so Enter means Skip (as Delete's prompt focuses Cancel).
+    const r = await modal<Answer>((done) => {
+      const skip = button("Skip", { kind: "primary", submit: true });
+      return {
+        title: `Replace ${name}?`,
+        intro: `${name} already exists in ${where}.`,
+        body: rest > 0 ? check(`Do the same for the other ${rest} item${rest === 1 ? "" : "s"}`, all) : undefined,
+        foot: [button("Cancel", { onclick: () => done("cancel") }), skip, button("Replace", { onclick: () => done("replace") })],
+        focus: skip,
+        onSubmit: () => done("skip"),
+      };
+    });
     const answer = r ?? "cancel";
     if (all.checked && answer !== "cancel") this.sticky = answer;
     return answer;
@@ -134,6 +135,8 @@ class Clashes {
 
 // ---------------------------------------------------------------------------
 // Transfers
+
+type Outcome = "ok" | "failed" | "cancelled";
 
 class Transfer {
   readonly id = crypto.randomUUID();
@@ -178,10 +181,10 @@ class Transfer {
     }
   }
 
-  finish(ok: boolean, message: string) {
+  finish(result: Outcome, message: string) {
     this.finished = true;
-    this.el.classList.add(ok ? "ok" : "failed");
-    if (ok) this.bar.style.width = "100%";
+    this.el.classList.add(result);
+    if (result === "ok") this.bar.style.width = "100%";
     this.detail.textContent = message;
     this.detail.title = message;
     this.action.title = "Dismiss";
@@ -231,6 +234,8 @@ export class FilePane {
   private msgEl: HTMLDivElement;
   private transfersEl: HTMLDivElement;
   private upBtn: HTMLButtonElement;
+  private homeBtn: HTMLButtonElement;
+  private refreshBtn: HTMLButtonElement;
   private downloadBtn: HTMLButtonElement;
   private changeBtns: HTMLButtonElement[];
   private transfers = new Set<Transfer>();
@@ -239,6 +244,9 @@ export class FilePane {
     const tool = (name: Parameters<typeof icon>[0], title: string, onclick: () => void) =>
       h("button", { type: "button", class: "btn ghost icon-only", title, onclick }, icon(name));
     this.upBtn = tool("arrowUp", "Up one folder (Backspace)", () => this.goUp());
+    this.homeBtn = tool("home", "Home folder", () => this.home && this.navigate(this.home));
+    // Stays live while connected: after a refusal it is the way to try again.
+    this.refreshBtn = tool("refresh", "Refresh (F5)", () => this.refresh());
     this.pathInput = h("input", { type: "text", class: "path", spellcheck: "false", "aria-label": "Remote folder", title: "Type a folder and press Enter" });
     this.pathInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
@@ -269,7 +277,7 @@ export class FilePane {
         h("span", { class: "grow" }),
         h("button", { type: "button", class: "btn ghost icon-only", title: "Close files", onclick: () => host.close() }, icon("close")),
       ),
-      h("div", { class: "files-bar" }, this.upBtn, tool("home", "Home folder", () => this.home && this.navigate(this.home)), this.pathInput, tool("refresh", "Refresh (F5)", () => this.refresh())),
+      h("div", { class: "files-bar" }, this.upBtn, this.homeBtn, this.pathInput, this.refreshBtn),
       h("div", { class: "files-bar actions" },
         uploadBtn,
         this.downloadBtn,
@@ -444,6 +452,8 @@ export class FilePane {
     this.pathInput.value = this.path;
     this.pathInput.disabled = !this.opened;
     this.upBtn.disabled = !this.opened || this.path === "/";
+    this.homeBtn.disabled = !this.opened || !this.home;
+    this.refreshBtn.disabled = !this.host.connected();
     this.el.classList.toggle("ready", this.opened);
     if (v.kind === "message") {
       this.listEl.replaceChildren();
@@ -793,10 +803,10 @@ export class FilePane {
     this.transfersEl.hidden = this.transfers.size === 0;
   }
 
-  private done(t: Transfer, ok: boolean, message: string) {
-    t.finish(ok, message);
-    // Successes clear themselves; failures wait to be read.
-    if (ok) window.setTimeout(() => this.dismiss(t), 5000);
+  private done(t: Transfer, result: Outcome, message: string) {
+    t.finish(result, result === "cancelled" ? "Cancelled" : message);
+    // Successes and cancels clear themselves; failures wait to be read.
+    if (result !== "failed") window.setTimeout(() => this.dismiss(t), 5000);
   }
 
   private async download(list = this.selection()) {
@@ -826,7 +836,7 @@ export class FilePane {
       const args = { connId: this.host.connId, id: t.id, remote: joinPath(from, entry.name), local, overwrite };
       try {
         const sum = await api.sftpDownload(args, (p) => t.progress(p));
-        this.done(t, true, summary("Downloaded", sum.files, sum.skipped.length, entry.kind === "dir"));
+        this.done(t, "ok", summary("Downloaded", sum.files, sum.skipped.length, entry.kind === "dir"));
       } catch (e) {
         if (errCode(e) === "EXISTS") {
           this.dismiss(t);
@@ -837,7 +847,7 @@ export class FilePane {
             continue;
           }
         } else {
-          this.done(t, false, errCode(e) === "CANCELLED" ? "Cancelled" : errText(e));
+          this.done(t, errCode(e) === "CANCELLED" ? "cancelled" : "failed", errText(e));
         }
       }
       targets.shift();
@@ -859,7 +869,7 @@ export class FilePane {
       const t = this.track(true, name);
       try {
         const sum = await api.sftpUpload({ connId: this.host.connId, id: t.id, remote: into, local, overwrite }, (p) => t.progress(p));
-        this.done(t, true, summary("Uploaded", sum.files, sum.skipped.length, folder));
+        this.done(t, "ok", summary("Uploaded", sum.files, sum.skipped.length, folder));
         if (this.path === into) this.navigate(into);
       } catch (e) {
         if (errCode(e) === "EXISTS") {
@@ -871,7 +881,7 @@ export class FilePane {
             continue;
           }
         } else {
-          this.done(t, false, errCode(e) === "CANCELLED" ? "Cancelled" : errText(e));
+          this.done(t, errCode(e) === "CANCELLED" ? "cancelled" : "failed", errText(e));
         }
       }
       queue.shift();
@@ -978,9 +988,9 @@ export class FilePane {
       } catch (e) {
         failed = errText(e);
       }
-      if (t.cancelled) this.done(t, false, "Cancelled");
-      else if (failed) this.done(t, false, failed);
-      else this.done(t, true, summary("Uploaded", sent, skipped, entry.isDirectory));
+      if (t.cancelled) this.done(t, "cancelled", "Cancelled");
+      else if (failed) this.done(t, "failed", failed);
+      else this.done(t, "ok", summary("Uploaded", sent, skipped, entry.isDirectory));
       if (this.path === into || parentPath(into) === this.path) this.navigate(this.path);
       if (failed || t.cancelled) break;
     }

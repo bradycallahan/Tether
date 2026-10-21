@@ -276,8 +276,11 @@ async fn ssh_sftp_browse_and_transfer() {
     // Uploading again asks before replacing.
     let again = files.upload("tab", "u2", &local.join("configs"), &root, false, |_| {}).await.unwrap_err();
     assert_eq!(again.code, "EXISTS");
+    // Replacing goes through a temporary name, and none is left behind.
+    files.upload("tab", "u3", &local.join("configs"), &root, true, |_| {}).await.unwrap();
 
     let list = files.list("tab", &sftp::join(&root, "configs")).await.unwrap();
+    assert!(list.iter().all(|e| !e.name.ends_with(".part")), "{list:?}");
     let image = list.iter().find(|e| e.name == "image.bin").unwrap();
     assert_eq!((image.kind, image.size), ("file", 3_000_000));
     assert_eq!(list.iter().find(|e| e.name == "old").unwrap().kind, "dir");
@@ -301,6 +304,12 @@ async fn ssh_sftp_browse_and_transfer() {
     let got = local.join("notes.txt");
     files.download("tab", "d3", &dropped, &got, false, |_| {}).await.unwrap();
     assert_eq!(std::fs::read(&got).unwrap(), b"first second");
+    // Streaming over an existing file replaces it.
+    files.stream_begin("tab", "s4", &dropped, true).await.unwrap();
+    files.stream_chunk("s4", b"third").await.unwrap();
+    files.stream_end("s4", true).await.unwrap();
+    files.download("tab", "d4", &dropped, &got, true, |_| {}).await.unwrap();
+    assert_eq!(std::fs::read(&got).unwrap(), b"third");
 
     // An abandoned stream leaves nothing behind.
     let abandoned = sftp::join(&root, "dropped/half.bin");
