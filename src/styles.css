@@ -559,9 +559,11 @@ table.ref td:first-child { width: 42%; }
 .toast .btn { height: 26px; color: var(--cable); font-weight: 600; }
 
 /* xterm tweaks */
-.xterm .xterm-viewport { scrollbar-width: thin; scrollbar-color: var(--rule) transparent; }
-.xterm-viewport::-webkit-scrollbar { width: 10px; }
-.xterm-viewport::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 5px; border: 2px solid var(--term-bg); }
+/* Windows draws its own thin overlay scrollbars (WebView2's Fluent style);
+   styling them here would bring back the classic chunky ones. */
+:root:not([data-platform="windows"]) .xterm .xterm-viewport { scrollbar-width: thin; scrollbar-color: var(--rule) transparent; }
+:root:not([data-platform="windows"]) .xterm-viewport::-webkit-scrollbar { width: 10px; }
+:root:not([data-platform="windows"]) .xterm-viewport::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 5px; border: 2px solid var(--term-bg); }
 
 /* ---------- narrow windows ---------- */
 

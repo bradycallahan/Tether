@@ -251,6 +251,7 @@ const handlers: Record<string, (a: Args) => unknown> = {
   default_shell: () => "/bin/bash",
   open_folder: () => undefined,
   data_dir: () => "/home/admin/.config/Tether",
+  window_ready: () => undefined,
   trust_host_key: ({ host }) => void db.trusted.add(host),
   connect,
   write: ({ connId, data }) => {

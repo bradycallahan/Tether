@@ -11,6 +11,7 @@ pub mod serial;
 pub mod ssh;
 pub mod store;
 pub mod telnet;
+pub mod window;
 
 use conn::{CmdError, CmdResult, ConnHandle, Ctl, Manager, Output, StatusEvent};
 use logger::{LogTarget, Logger};
@@ -19,13 +20,14 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use store::Store;
 use tauri::ipc::Channel;
-use tauri::State;
+use tauri::{Manager as _, State};
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::mpsc;
 
 struct AppState {
     store: Store,
     manager: Manager,
+    placement: window::Placement,
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +182,13 @@ fn open_folder(app: tauri::AppHandle, state: State<AppState>, which: String) -> 
 #[tauri::command]
 fn data_dir(state: State<AppState>) -> String {
     state.store.root().to_string_lossy().into_owned()
+}
+
+/// The UI calls this once its first frame is ready, so the window never
+/// appears blank or flashes white.
+#[tauri::command]
+fn window_ready(win: tauri::WebviewWindow, state: State<AppState>) {
+    window::show(&win, &state.placement);
 }
 
 #[tauri::command]
@@ -457,7 +466,27 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(AppState { store, manager: Manager::default() })
+        .manage(AppState { store, manager: Manager::default(), placement: window::Placement::default() })
+        .setup(|app| {
+            if let Some(win) = app.get_webview_window("main") {
+                let state = app.state::<AppState>();
+                window::restore(&win, &state.store, &state.placement);
+                // If the UI never reports in (a script error, say), show the
+                // window anyway rather than leave an invisible process.
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(4));
+                    let state = win.state::<AppState>();
+                    window::show(&win, &state.placement);
+                });
+            }
+            Ok(())
+        })
+        .on_window_event(|win, event| {
+            if let Some(webview) = win.app_handle().get_webview_window(win.label()) {
+                let state = webview.state::<AppState>();
+                window::on_event(&webview, event, &state.store, &state.placement);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             save_session,
@@ -481,6 +510,7 @@ pub fn run() {
             default_shell,
             open_folder,
             data_dir,
+            window_ready,
             trust_host_key,
             connect,
             write,

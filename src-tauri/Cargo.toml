@@ -36,6 +36,11 @@ dirs = "6"
 parking_lot = "0.12"
 log = "0.4"
 
+# Already part of Tauri on Windows; named here to reach WebView2's settings.
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.39"
+windows-core = "0.62"
+
 # Small, fast-starting release builds. The terminal's heavy lifting happens in
 # the webview, so optimizing the Rust side for size costs nothing noticeable.
 [profile.release]

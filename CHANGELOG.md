@@ -23,8 +23,20 @@ All notable changes to Tether are listed here. The format follows [Keep a Change
 - Keyboard shortcuts sheet (F1), quick reference for address formats and send-string escapes, About
 - Confirmation before quitting with connected tabs
 - Full screen (F11) and F10 to reach the menu bar
+- Tether reopens at the size and place it was closed, maximized if it was; a window left on a monitor that's no longer plugged in opens centered instead
+- The taskbar button flashes when a background tab rings the bell or drops its connection
+- Ctrl+Insert copies and Shift+Insert pastes everywhere, the Windows convention
+
+### Fixed
+- Windows: dragging sessions between folders, reordering tabs and dragging a session onto the tab area work (they did nothing before)
+- Windows: F5, Ctrl+R and other browser keys no longer reload the window, which dropped every connection; Ctrl+P, Ctrl+F and F7 no longer open browser features
+- Right-clicking anywhere without a menu of its own no longer shows the web engine's Back/Reload/Print menu
+- Dropping a file on the window no longer replaces Tether with the file
 
 ### Changed
+- Windows: the title bar follows Tether's light or dark theme, scrollbars are the thin Windows 11 overlay kind, and the browser's form suggestions no longer drop down under host and user fields
+- The window appears once it's drawn, instead of flashing white on launch
+- The installer lists a publisher, copyright and homepage
 - Session options and Settings use a category list instead of tabs, and gained Appearance, Logging and Advanced pages
 - Every connection state is shown in a banner above the terminal: connecting, failed (with Try again and Edit session), dropped (with Reconnect) and waiting to reconnect
 - The multi-line paste dialog says which device or how many tabs the paste is going to, and warns in amber while broadcasting

@@ -15,6 +15,7 @@ import { folderName, isUnder, joinFolder, store } from "./state";
 import { TabManager, type Tab, type TabState } from "./tabs";
 import { hostLabel, newSession, PROTOCOL_NAMES, type Protocol, type Session, type Settings } from "./types";
 import { Welcome } from "./welcome";
+import { guardWebview, setWindowTheme } from "./platform";
 
 const MANY_TABS = 8;
 
@@ -60,15 +61,19 @@ class App {
     store.on("sessions", () => this.refresh());
     matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => this.applyTheme());
     addEventListener("keydown", (e) => this.shortcut(e), true);
+    guardWebview();
     addEventListener("focus", () => this.tabs.active?.tabEl.classList.remove("unread"));
     this.restoreWorkspace();
     this.guardClose();
+    // The window starts hidden; show it once this first frame has painted.
+    requestAnimationFrame(() => requestAnimationFrame(() => api.windowReady().catch(() => {})));
   }
 
   applyTheme() {
     const pref = store.settings.uiTheme;
     const light = pref === "light" || (pref === "system" && matchMedia("(prefers-color-scheme: light)").matches);
     document.documentElement.dataset.theme = light ? "light" : "dark";
+    setWindowTheme(pref === "system" ? null : pref);
     this.root.style.setProperty("--sidebar-w", `${store.settings.sidebarWidth}px`);
   }
 
@@ -110,8 +115,8 @@ class App {
       { id: "tab.close", label: "Close tab", keys: ["Mod+Shift+W"], macKeys: ["Meta+W"], enabled: has, run: () => active() && this.tabs.close(active()!) },
       { id: "app.quit", label: isMac ? "Quit Tether" : "Exit", run: () => getCurrentWindow().close() },
       // Edit
-      { id: "edit.copy", label: "Copy", icon: "copy", keys: ["Mod+Shift+C"], macKeys: ["Meta+C"], enabled: () => !!active()?.term.hasSelection(), run: () => active()?.copySelection() },
-      { id: "edit.paste", label: "Paste", icon: "paste", keys: ["Mod+Shift+V"], macKeys: ["Meta+V"], enabled: has, run: () => active()?.pasteFromClipboard() },
+      { id: "edit.copy", label: "Copy", icon: "copy", keys: ["Mod+Shift+C", "Ctrl+Insert"], macKeys: ["Meta+C"], enabled: () => !!active()?.term.hasSelection(), run: () => active()?.copySelection() },
+      { id: "edit.paste", label: "Paste", icon: "paste", keys: ["Mod+Shift+V", "Shift+Insert"], macKeys: ["Meta+V"], enabled: has, run: () => active()?.pasteFromClipboard() },
       { id: "edit.selectAll", label: "Select all", keys: ["Mod+Shift+A"], macKeys: ["Meta+A"], enabled: has, run: () => active()?.term.selectAll() },
       { id: "edit.find", label: "Find…", icon: "search", detail: "Find in scrollback", keys: ["Mod+Shift+F"], macKeys: ["Meta+F"], enabled: has, run: () => active()?.openFind() },
       { id: "edit.clear", label: "Clear scrollback", icon: "eraser", macKeys: ["Meta+K"], enabled: has, run: () => active()?.clearScrollback() },

@@ -1,8 +1,15 @@
 let fullscreen = false;
 const closeHandlers: ((e: { preventDefault(): void }) => unknown)[] = [];
 
+export enum UserAttentionType {
+  Critical = 1,
+  Informational = 2,
+}
+
 export function getCurrentWindow() {
   return {
+    setTheme: async (_theme: "light" | "dark" | null) => {},
+    requestUserAttention: async (_type: UserAttentionType | null) => {},
     setTitle: async (t: string) => {
       document.title = t;
     },

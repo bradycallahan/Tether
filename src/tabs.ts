@@ -16,6 +16,7 @@ import { showMenu, type MenuEntry } from "./menu";
 import { scheme } from "./schemes";
 import { store } from "./state";
 import { playSendString } from "./escapes";
+import { requestAttention } from "./platform";
 import { hostLabel, PROTOCOL_NAMES, type CmdError, type Session, type StatusEvent } from "./types";
 
 export type TabState = "idle" | "connecting" | "connected" | "closed";
@@ -202,6 +203,7 @@ export class Tab {
         this.pane.classList.add("bell");
       }
       if (!this.host.isVisible(this)) this.tabEl.classList.add("unread");
+      requestAttention();
     });
     t.onSelectionChange(() => {
       if (store.settings.copyOnSelect && t.hasSelection()) navigator.clipboard.writeText(t.getSelection()).catch(() => {});
@@ -243,10 +245,6 @@ export class Tab {
     if (!isMac && e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "c" && this.term.hasSelection()) {
       this.copySelection();
       this.term.clearSelection();
-      return false;
-    }
-    if (e.shiftKey && e.key === "Insert") {
-      this.pasteFromClipboard();
       return false;
     }
     return true;
@@ -625,6 +623,7 @@ export class Tab {
         this.logPath = null;
         this.info(`— ${ev.message} ${new Date().toLocaleTimeString()}`, "33");
         if (this.session.autoReconnect && !this.userClosed) this.scheduleReconnect();
+        if (!this.userClosed) requestAttention();
         this.setState("closed", ev.message);
         break;
       }

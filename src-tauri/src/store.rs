@@ -7,6 +7,7 @@
 //!   highlights.toml
 //!   folders.toml         (folders, including empty ones)
 //!   workspace.toml       (tabs open at last exit, recent sessions)
+//!   window.toml          (main window size and position)
 //!   known_hosts          (OpenSSH format)
 //!   sessions/<slug>-<id8>.toml
 //!   logs/
@@ -207,6 +208,18 @@ impl Store {
 
     pub fn save_workspace(&self, w: &Workspace) -> Result<()> {
         atomic_write(&self.root.join("workspace.toml"), &toml::to_string_pretty(w)?)
+    }
+
+    pub fn window_placement(&self) -> Option<WindowPlacement> {
+        let path = self.root.join("window.toml");
+        if !path.exists() {
+            return None;
+        }
+        read_toml(&path).map_err(|e| log::warn!("ignoring window.toml: {e:#}")).ok()
+    }
+
+    pub fn save_window_placement(&self, p: &WindowPlacement) -> Result<()> {
+        atomic_write(&self.root.join("window.toml"), &toml::to_string_pretty(p)?)
     }
 }
 

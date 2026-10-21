@@ -330,6 +330,20 @@ pub struct WorkspaceTab {
     pub in_broadcast: bool,
 }
 
+/// Where the main window was when Tether last closed (`window.toml`). Only
+/// the backend reads it; the UI never sees it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WindowPlacement {
+    /// Outer top-left corner, in physical pixels.
+    pub x: i32,
+    pub y: i32,
+    /// Inner size in logical pixels, so it survives a change of display scaling.
+    pub width: f64,
+    pub height: f64,
+    pub maximized: bool,
+}
+
 fn yes() -> bool {
     true
 }

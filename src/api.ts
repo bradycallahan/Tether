@@ -25,6 +25,7 @@ export const api = {
   defaultShell: () => invoke<string>("default_shell"),
   openFolder: (which: "logs" | "data") => invoke<void>("open_folder", { which }),
   dataDir: () => invoke<string>("data_dir"),
+  windowReady: () => invoke<void>("window_ready"),
   trustHostKey: (host: string, port: number, key: string, replace: boolean) =>
     invoke<void>("trust_host_key", { host, port, key, replace }),
 
