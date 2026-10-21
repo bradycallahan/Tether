@@ -80,7 +80,7 @@ class App {
     addEventListener("keydown", (e) => this.shortcut(e), true);
     if (!isMac) this.altTapsMenuBar();
     guardWebview();
-    addEventListener("focus", () => this.tabs.active?.tabEl.classList.remove("unread"));
+    addEventListener("focus", () => this.tabs.active?.seen());
     // Saved passwords must be unlocked before restored tabs connect with them.
     if ((await api.vaultStatus().catch(() => undefined))?.enabled) {
       await api.windowReady().catch(() => {});

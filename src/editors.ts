@@ -744,6 +744,10 @@ export async function editSettings(
   const reconnect = h("input", { type: "checkbox", checked: s.reconnectOnEnter });
   const restore = h("input", { type: "checkbox", checked: s.restoreWorkspace });
   const bell = select(s.bell, [["visual", "Flash the terminal"], ["none", "Off"]]);
+  const quietChoices: [string, string][] = [["0", "Off"], ["5", "After 5 seconds"], ["10", "After 10 seconds"], ["30", "After 30 seconds"], ["60", "After a minute"]];
+  // Keep a value edited by hand in settings.toml instead of showing a blank select.
+  if (!quietChoices.some(([v]) => v === String(s.quietTabSecs))) quietChoices.push([String(s.quietTabSecs), `After ${s.quietTabSecs} seconds`]);
+  const quiet = select(String(s.quietTabSecs), quietChoices);
   const hlDefault = select(s.defaultHighlightSet ?? "", [["", "None"], ...store.highlights.map((x) => [x.name, x.name] as [string, string])]);
   const barDefault = select(s.defaultButtonBar ?? "", [["", "None"], ...store.bars.map((x) => [x.name, x.name] as [string, string])]);
   const logDir = input(s.logDirectory, { placeholder: "Inside Tether's data folder" });
@@ -823,6 +827,7 @@ export async function editSettings(
           check("Reopen last time's tabs when Tether starts", restore, "Tabs reconnect on their own. Broadcast always starts off."),
         ),
         h("div", { class: "grid2" }, field("Scrollback lines", scrollback), field("Bell", bell)),
+        field("Mark background tabs that go quiet", quiet, "A tick appears on a tab whose output (a copy, a long show, a reload) has stopped, so you know it's done."),
       ),
     },
     {
@@ -882,6 +887,7 @@ export async function editSettings(
       s.reconnectOnEnter = reconnect.checked;
       s.restoreWorkspace = restore.checked;
       s.bell = bell.value as Settings["bell"];
+      s.quietTabSecs = Number(quiet.value);
       s.defaultHighlightSet = hlDefault.value || null;
       s.defaultButtonBar = barDefault.value || null;
       s.logDirectory = logDir.value.trim();

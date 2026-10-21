@@ -17,6 +17,7 @@ import { scheme } from "./schemes";
 import { store } from "./state";
 import { describeSend, playSendString } from "./escapes";
 import { requestAttention } from "./platform";
+import { QuietWatch } from "./quiet";
 import { hostLabel, PROTOCOL_NAMES, type CmdError, type Session, type StatusEvent } from "./types";
 
 export type TabState = "idle" | "connecting" | "connected" | "closed";
@@ -86,9 +87,13 @@ export class Tab {
   private reconnectAttempt = 0;
   private bannerTimer: number | undefined;
   private idleTimer: number | undefined;
+  /** Background output watch for the "went quiet" mark (see watchQuiet). */
+  private quietTimer: number | undefined;
+  private quiet = new QuietWatch();
   /** The user asked for this disconnect, so don't auto-reconnect. */
   private userClosed = false;
   private lastError: string | null = null;
+  private quietNote = "";
 
   constructor(public session: Session, public saved: boolean, private host: TabHost) {
     this.title = session.name || hostLabel(session.protocol);
@@ -150,6 +155,7 @@ export class Tab {
       this.led,
       this.bcEl,
       this.titleEl,
+      h("span", { class: "quiet-mark", "aria-hidden": "true" }, icon("check")),
       h("button", {
         type: "button",
         class: "x",
@@ -357,7 +363,8 @@ export class Tab {
   }
 
   private updateTooltip() {
-    this.tabEl.title = `${this.title}\n${PROTOCOL_NAMES[this.session.protocol.kind]} ${hostLabel(this.session.protocol)}\n${this.statusMessage}`;
+    const quiet = this.quietNote ? `\n${this.quietNote}` : "";
+    this.tabEl.title = `${this.title}\n${PROTOCOL_NAMES[this.session.protocol.kind]} ${hostLabel(this.session.protocol)}\n${this.statusMessage}${quiet}`;
   }
 
   setTitle(title: string, custom = true) {
@@ -382,7 +389,7 @@ export class Tab {
     this.pane.classList.toggle("active", active);
     this.tabEl.setAttribute("aria-selected", String(active));
     if (active) {
-      this.tabEl.classList.remove("unread");
+      this.seen();
       this.fitSoon();
     }
   }
@@ -393,7 +400,11 @@ export class Tab {
     this.statusMessage = message;
     for (const led of [this.led, this.paneLed]) led.className = `led ${state === "idle" ? "" : state}`;
     if (state === "connected" && was !== "connected") this.connectedAt = Date.now();
-    if (state !== "connected") this.connectedAt = null;
+    if (state !== "connected") {
+      this.connectedAt = null;
+      // A dropped link is its own (red) state; "went quiet" would mislead.
+      this.clearQuiet();
+    }
     this.updateTooltip();
     this.renderBanner();
     this.host.changed(this);
@@ -675,7 +686,53 @@ export class Tab {
       this.lastPulse = now;
       this.led.animate([{ background: "var(--activity)" }, { background: "var(--link)" }], { duration: 140 });
     }
-    if (!this.host.isVisible(this)) this.tabEl.classList.add("unread");
+    if (!this.host.isVisible(this)) {
+      this.tabEl.classList.add("unread");
+      this.watchQuiet(now);
+    }
+  }
+
+  /** The user is looking at this tab: clear the unread and quiet marks. */
+  seen() {
+    this.tabEl.classList.remove("unread");
+    clearTimeout(this.quietTimer);
+    this.quietTimer = undefined;
+    this.quiet.reset();
+    this.clearQuiet();
+  }
+
+  private clearQuiet() {
+    if (!this.quietNote) return;
+    this.tabEl.classList.remove("quiet");
+    this.quietNote = "";
+    this.updateTooltip();
+  }
+
+  /**
+   * SecureCRT's "inactivity" tab state, aimed at what admins wait for: a
+   * background tab that was busy and has now gone quiet (see QuietWatch). One
+   * timer per burst, not per chunk, so the output path stays cheap.
+   */
+  private watchQuiet(now: number) {
+    const secs = store.settings.quietTabSecs;
+    if (!secs) return;
+    // Busy again: the old "stopped at" time no longer holds. A lone log line doesn't count.
+    if (this.quiet.output(now)) this.clearQuiet();
+    if (this.quietTimer !== undefined) return;
+    const check = () => {
+      const left = this.quiet.remaining(performance.now(), secs * 1000);
+      if (left > 50) {
+        this.quietTimer = window.setTimeout(check, left);
+        return;
+      }
+      this.quietTimer = undefined;
+      if (!this.quiet.settle() || this.state !== "connected" || this.host.isVisible(this)) return;
+      const stopped = new Date(Date.now() - (performance.now() - this.quiet.lastOutput));
+      this.tabEl.classList.add("quiet");
+      this.quietNote = `Output stopped at ${stopped.toLocaleTimeString()}`;
+      this.updateTooltip();
+    };
+    this.quietTimer = window.setTimeout(check, secs * 1000);
   }
 
   disconnect() {
@@ -793,6 +850,7 @@ export class Tab {
     clearTimeout(this.reconnectTimer);
     clearTimeout(this.idleTimer);
     clearTimeout(this.bannerTimer);
+    clearTimeout(this.quietTimer);
     api.disconnect(this.connId);
     this.resizeObs.disconnect();
     this.highlighter.dispose();

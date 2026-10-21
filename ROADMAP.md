@@ -33,6 +33,7 @@ How Tether 0.1 compares with what SecureCRT offers, and what's planned next. "Do
 | Menu bar and toolbar | Yes | Done |
 | Auto-reconnect | Yes | Done, with back-off |
 | Anti-idle | Yes | Done (send a string after N idle seconds) |
+| Tab activity / inactivity marks | Yes | Done (unread output in bold, a tick when a busy background tab goes quiet) |
 | Clone session | Yes | Done |
 | Multi-line paste confirmation | No | Done |
 | Import from SecureCRT | n/a | Done (hosts, ports, users, serial, folders) |
