@@ -249,6 +249,11 @@ const handlers: Record<string, (a: Args) => unknown> = {
   import_securecrt: () => ({ sessions: [sess("imported-sw1", "Imported/Branch", ssh("192.168.50.2"))], skipped: [] }),
   list_serial_ports: () => [{ name: "/dev/ttyUSB0", description: "FTDI FT232R USB UART" }],
   default_shell: () => "/bin/bash",
+  list_shells: () => [
+    { name: "bash", command: "/bin/bash" },
+    { name: "zsh", command: "/usr/bin/zsh" },
+    { name: "fish", command: "/usr/bin/fish" },
+  ],
   open_folder: () => undefined,
   data_dir: () => "/home/admin/.config/Tether",
   window_ready: () => undefined,

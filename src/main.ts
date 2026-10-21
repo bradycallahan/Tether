@@ -13,7 +13,7 @@ import { Omnibox } from "./omnibox";
 import { draggedSessionIds, isSessionDrag, quickSession, Sidebar } from "./sidebar";
 import { folderName, isUnder, joinFolder, store } from "./state";
 import { TabManager, type Tab, type TabState } from "./tabs";
-import { hostLabel, newSession, PROTOCOL_NAMES, type Protocol, type Session, type Settings } from "./types";
+import { hostLabel, newSession, PROTOCOL_NAMES, type Protocol, type Session, type Settings, type ShellInfo } from "./types";
 import { Welcome } from "./welcome";
 import { guardWebview, setWindowTheme } from "./platform";
 
@@ -37,6 +37,8 @@ class App {
   uptimeEl: HTMLElement | null = null;
   currentBar: string | null = null;
   history: string[] = [];
+  /** Shells found on this machine, default first; filled in shortly after startup. */
+  shells: ShellInfo[] = [];
   historyPos = -1;
   private uptimeTimer: number | undefined;
   private lastActive: Tab | null = null;
@@ -65,6 +67,7 @@ class App {
     addEventListener("focus", () => this.tabs.active?.tabEl.classList.remove("unread"));
     this.restoreWorkspace();
     this.guardClose();
+    store.shells().then((list) => (this.shells = list));
     // The window starts hidden; show it once this first frame has painted.
     requestAnimationFrame(() => requestAnimationFrame(() => api.windowReady().catch(() => {})));
   }
@@ -187,6 +190,7 @@ class App {
         items: () => [
           cmd("session.new"), cmd("folder.new"), "-",
           cmd("connect.focus"), cmd("connect.quick"), cmd("connect.serial"), cmd("connect.local"),
+          ...this.shellMenu(),
           { label: "Recent sessions", icon: "clock", submenu: this.recentMenu() }, "-",
           cmd("tab.reconnect"), cmd("tab.disconnect"), cmd("tab.reconnectAll"), cmd("tab.disconnectAll"), "-",
           cmd("log.toggle"), cmd("log.openFolder"), "-",
@@ -248,6 +252,12 @@ class App {
       group("Finding things", ["tools.palette", "view.findSession", "view.sidebar"]),
       group("Settings and help", ["session.options", "tools.settings", "help."]),
     ];
+  }
+
+  /** "Other shells ▸" with every shell found here, once there's more than one. */
+  shellMenu(): MenuItem[] {
+    if (this.shells.length < 2) return [];
+    return [{ label: "Other shells", icon: "terminal", submenu: this.shells.map((sh): MenuItem => ({ label: sh.name, action: () => this.openLocal(sh) })) }];
   }
 
   recentMenu(): MenuItem[] {
@@ -824,8 +834,9 @@ class App {
     await store.deleteFolder(path);
   }
 
-  async openLocal() {
-    this.tabs.open(newSession({ name: "Local shell", protocol: { kind: "local", shell: "" } }), false);
+  openLocal(shell?: ShellInfo) {
+    const name = shell?.name ?? this.shells[0]?.name ?? "Local shell";
+    this.tabs.open(newSession({ name, protocol: { kind: "local", shell: shell?.command ?? "" } }), false);
   }
 
   async quickConnect(kind?: Protocol["kind"]) {
@@ -909,6 +920,7 @@ class App {
       cmd("connect.quick"),
       cmd("connect.serial"),
       cmd("connect.local"),
+      ...this.shellMenu(),
       ...(recent.length ? (["-"] as MenuEntry[]) : []),
       ...recent.map((s): MenuItem => ({ label: s.name, hint: hostLabel(s.protocol), action: () => this.openSessions([s]) })),
     ]);

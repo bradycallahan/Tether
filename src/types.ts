@@ -154,6 +154,12 @@ export interface PortInfo {
   description: string;
 }
 
+/** A shell found on this machine. `command` goes in a session's `shell`. */
+export interface ShellInfo {
+  name: string;
+  command: string;
+}
+
 export interface ImportReport {
   sessions: Session[];
   skipped: string[];

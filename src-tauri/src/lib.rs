@@ -168,6 +168,11 @@ fn default_shell() -> String {
 }
 
 #[tauri::command]
+async fn list_shells() -> Vec<local::ShellInfo> {
+    tokio::task::spawn_blocking(local::list_shells).await.unwrap_or_default()
+}
+
+#[tauri::command]
 fn open_folder(app: tauri::AppHandle, state: State<AppState>, which: String) -> CmdResult<()> {
     let settings = state.store.settings()?;
     let path = match which.as_str() {
@@ -508,6 +513,7 @@ pub fn run() {
             import_securecrt,
             list_serial_ports,
             default_shell,
+            list_shells,
             open_folder,
             data_dir,
             window_ready,

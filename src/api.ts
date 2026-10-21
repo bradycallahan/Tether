@@ -1,5 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
-import type { ButtonBar, HighlightSet, ImportReport, PortInfo, SecretKind, Session, Settings, StatusEvent, Workspace } from "./types";
+import type { ButtonBar, HighlightSet, ImportReport, PortInfo, SecretKind, Session, Settings, ShellInfo, StatusEvent, Workspace } from "./types";
 
 export const api = {
   listSessions: () => invoke<Session[]>("list_sessions"),
@@ -23,6 +23,7 @@ export const api = {
   importSecureCrt: (path: string) => invoke<ImportReport>("import_securecrt", { path }),
   listSerialPorts: () => invoke<PortInfo[]>("list_serial_ports"),
   defaultShell: () => invoke<string>("default_shell"),
+  listShells: () => invoke<ShellInfo[]>("list_shells"),
   openFolder: (which: "logs" | "data") => invoke<void>("open_folder", { which }),
   dataDir: () => invoke<string>("data_dir"),
   windowReady: () => invoke<void>("window_ready"),

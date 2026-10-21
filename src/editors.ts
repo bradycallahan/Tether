@@ -221,11 +221,41 @@ function protocolForm(initial: Protocol, selfId: string | null): ProtocolForm {
         };
       };
     } else {
-      const shell = input(p.shell, { placeholder: "Your default shell" });
-      api.defaultShell().then((d) => (shell.placeholder = `Default: ${d}`)).catch(() => {});
-      box.append(field("Shell", shell, "Leave blank for your default shell. Arguments work, e.g. wsl -d Ubuntu."));
-      first = shell;
-      collect = () => ({ kind: "local", shell: shell.value.trim() });
+      // A picker of the shells found on this machine, plus "Other" for a
+      // command line of your own (arguments and quoted paths work).
+      const custom = input(p.shell, { placeholder: 'wsl.exe -d Ubuntu or "C:\\Tools\\my shell.exe" -l' });
+      const OTHER = "\u0000other";
+      // Until the probe answers, the saved command stands in as its own option.
+      const pick = h("select", {}, h("option", { value: "" }, "Default shell"), p.shell ? h("option", { value: p.shell, selected: true }, p.shell) : null);
+      const customField = field("Command", custom, "Quote a path that has spaces in it.");
+      customField.hidden = true;
+      const sync = () => {
+        customField.hidden = pick.value !== OTHER;
+      };
+      pick.addEventListener("change", () => {
+        sync();
+        if (!customField.hidden) custom.focus();
+      });
+      store.shells().then((list) => {
+        const current = pick.value;
+        clear(pick);
+        pick.append(
+          h("option", { value: "" }, list[0] ? `Default shell (${list[0].name})` : "Default shell"),
+          ...list.map((sh) => h("option", { value: sh.command }, sh.name)),
+          h("option", { value: OTHER }, "Other…"),
+        );
+        const known = current === "" || list.some((sh) => sh.command === current);
+        if (!known) custom.value = current;
+        pick.value = known ? current : OTHER;
+        sync();
+      });
+      box.append(field("Shell", pick), customField);
+      first = pick;
+      collect = () => {
+        if (pick.value !== OTHER) return { kind: "local", shell: pick.value };
+        if (!custom.value.trim()) return "Enter the command that starts the shell, or pick one from the list.";
+        return { kind: "local", shell: custom.value.trim() };
+      };
     }
   };
   renderKinds();

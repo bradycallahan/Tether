@@ -1,5 +1,5 @@
 import { api } from "./api";
-import type { ButtonBar, HighlightSet, Session, Settings, Workspace } from "./types";
+import type { ButtonBar, HighlightSet, Session, Settings, ShellInfo, Workspace } from "./types";
 
 type Topic = "sessions" | "bars" | "highlights" | "settings" | "recent";
 
@@ -16,6 +16,7 @@ class Store {
   workspace: Workspace = { tabs: [], active: 0, tiled: false, recent: [] };
   private listeners = new Map<Topic, Set<() => void>>();
   private workspaceTimer: number | undefined;
+  private shellList: Promise<ShellInfo[]> | undefined;
 
   async load() {
     [this.sessions, this.bars, this.highlights, this.settings, this.explicitFolders, this.workspace] = await Promise.all([
@@ -26,6 +27,12 @@ class Store {
       api.getFolders().catch(() => []),
       api.getWorkspace().catch(() => ({ tabs: [], active: 0, tiled: false, recent: [] })),
     ]);
+  }
+
+  /** Shells installed on this machine, default first. Probed once, on first use. */
+  shells(): Promise<ShellInfo[]> {
+    this.shellList ??= api.listShells().catch(() => []);
+    return this.shellList;
   }
 
   on(topic: Topic, fn: () => void) {

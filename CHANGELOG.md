@@ -26,12 +26,14 @@ All notable changes to Tether are listed here. The format follows [Keep a Change
 - Tether reopens at the size and place it was closed, maximized if it was; a window left on a monitor that's no longer plugged in opens centered instead
 - The taskbar button flashes when a background tab rings the bell or drops its connection
 - Ctrl+Insert copies and Shift+Insert pastes everywhere, the Windows convention
+- A shell picker for local-shell sessions and an "Other shells" menu, listing the shells found on this computer: PowerShell 7, Windows PowerShell, Command Prompt, each WSL distribution and Git Bash on Windows; the shells in /etc/shells elsewhere. Local tabs are named after their shell
 
 ### Fixed
 - Windows: dragging sessions between folders, reordering tabs and dragging a session onto the tab area work (they did nothing before)
 - Windows: F5, Ctrl+R and other browser keys no longer reload the window, which dropped every connection; Ctrl+P, Ctrl+F and F7 no longer open browser features
 - Right-clicking anywhere without a menu of its own no longer shows the web engine's Back/Reload/Print menu
 - Dropping a file on the window no longer replaces Tether with the file
+- Local shells whose path has spaces in it (`C:\Program Files\Git\bin\bash.exe`) start; quote the path, or paste it bare
 
 ### Changed
 - Windows: the title bar follows Tether's light or dark theme, scrollbars are the thin Windows 11 overlay kind, and the browser's form suggestions no longer drop down under host and user fields
