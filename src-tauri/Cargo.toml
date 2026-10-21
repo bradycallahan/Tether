@@ -1,6 +1,6 @@
 [package]
 name = "tether"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 description = "Tether — an open-source terminal for SSH and serial consoles"
 license = "MIT"
