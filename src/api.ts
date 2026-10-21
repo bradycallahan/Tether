@@ -20,6 +20,12 @@ export const api = {
   /** An empty value removes the secret. */
   setSecret: (id: string, kind: SecretKind, value: string) => invoke<void>("set_secret", { id, kind, value }),
   forgetSecrets: (id: string) => invoke<void>("forget_secrets", { id }),
+  vaultStatus: () => invoke<{ enabled: boolean; unlocked: boolean }>("vault_status"),
+  vaultUnlock: (passphrase: string) => invoke<void>("vault_unlock", { passphrase }),
+  vaultEnable: (passphrase: string) => invoke<void>("vault_enable", { passphrase }),
+  vaultChange: (passphrase: string) => invoke<void>("vault_change", { passphrase }),
+  vaultDisable: () => invoke<void>("vault_disable"),
+  vaultReset: () => invoke<void>("vault_reset"),
   importSecureCrt: (path: string) => invoke<ImportReport>("import_securecrt", { path }),
   listSerialPorts: () => invoke<PortInfo[]>("list_serial_ports"),
   defaultShell: () => invoke<string>("default_shell"),

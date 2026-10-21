@@ -35,6 +35,10 @@ regex = "1"
 dirs = "6"
 parking_lot = "0.12"
 log = "0.4"
+aes-gcm = "0.11"
+argon2 = "0.6"
+getrandom = "0.3"
+zeroize = "1"
 
 # Already part of Tauri on Windows; named here to reach WebView2's settings.
 [target.'cfg(windows)'.dependencies]

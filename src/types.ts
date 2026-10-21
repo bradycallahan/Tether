@@ -120,6 +120,8 @@ export interface Settings {
   showToolbar: boolean;
   showSidebar: boolean;
   showStatusBar: boolean;
+  /** The master passphrase has been offered once (first run). */
+  vaultOffered: boolean;
 }
 
 export interface WorkspaceTab {

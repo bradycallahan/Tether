@@ -34,6 +34,8 @@ const sess = (name: string, folder: string, protocol: Args, extra: Args = {}) =>
 });
 
 const empty = new URLSearchParams(location.search).has("empty");
+const vault = { enabled: new URLSearchParams(location.search).has("locked"), unlocked: false };
+let vaultPassphrase = "preview passphrase";
 
 const db = {
   sessions: empty
@@ -75,6 +77,8 @@ const db = {
     showToolbar: true,
     showSidebar: true,
     showStatusBar: true,
+    // A first-run library (?empty) shows the master passphrase offer.
+    vaultOffered: !empty,
   } as Args,
   bars: [
     {
@@ -249,6 +253,22 @@ const handlers: Record<string, (a: Args) => unknown> = {
     db.secrets.get(id)!.add(kind);
   },
   forget_secrets: ({ id }) => void db.secrets.delete(id),
+  // ?locked starts with a master passphrase set ("preview passphrase") and locked.
+  vault_status: () => ({ ...vault }),
+  vault_unlock: ({ passphrase }) => {
+    if (passphrase !== vaultPassphrase) throw { code: "BAD_PASSPHRASE", message: "That isn't the master passphrase." };
+    vault.unlocked = true;
+  },
+  vault_enable: ({ passphrase }) => {
+    vaultPassphrase = passphrase;
+    Object.assign(vault, { enabled: true, unlocked: true });
+  },
+  vault_change: ({ passphrase }) => void (vaultPassphrase = passphrase),
+  vault_disable: () => void Object.assign(vault, { enabled: false, unlocked: false }),
+  vault_reset: () => {
+    Object.assign(vault, { enabled: false, unlocked: false });
+    db.secrets.clear();
+  },
   import_securecrt: () => ({ sessions: [sess("imported-sw1", "Imported/Branch", ssh("192.168.50.2"))], skipped: [] }),
   list_serial_ports: () => [{ name: "/dev/ttyUSB0", description: "FTDI FT232R USB UART" }],
   default_shell: () => "/bin/bash",

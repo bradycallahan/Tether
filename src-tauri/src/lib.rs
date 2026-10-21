@@ -11,6 +11,7 @@ pub mod serial;
 pub mod ssh;
 pub mod store;
 pub mod telnet;
+pub mod vault;
 pub mod window;
 
 use conn::{CmdError, CmdResult, ConnHandle, Ctl, Manager, Output, StatusEvent};
@@ -110,7 +111,7 @@ fn save_settings(state: State<AppState>, settings: Settings) -> CmdResult<()> {
     Ok(state.store.save_settings(&settings)?)
 }
 
-const SECRET_KINDS: [&str; 3] = [secrets::PASSWORD, secrets::PASSPHRASE, secrets::ENABLE];
+const SECRET_KINDS: [&str; 3] = secrets::KINDS;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -137,7 +138,64 @@ fn set_secret(id: String, kind: String, value: String) -> CmdResult<()> {
         return Err(CmdError::new("ARG", "Unknown kind of secret."));
     };
     let r = if value.is_empty() { secrets::delete(&id, kind) } else { secrets::set(&id, kind, &value) };
-    r.map_err(|e| CmdError::new("KEYCHAIN", format!("The system keychain refused it: {e:#}")))
+    r.map_err(|e| CmdError::new("KEYCHAIN", format!("Couldn't save it: {e:#}")))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultStatus {
+    enabled: bool,
+    unlocked: bool,
+}
+
+#[tauri::command]
+fn vault_status() -> VaultStatus {
+    let (enabled, unlocked) = secrets::vault_status();
+    VaultStatus { enabled, unlocked }
+}
+
+/// Unlock saved secrets with the master passphrase; `BAD_PASSPHRASE` if it's wrong.
+#[tauri::command]
+async fn vault_unlock(passphrase: String) -> CmdResult<()> {
+    // Key derivation takes a moment by design; keep it off the main thread.
+    let ok = tauri::async_runtime::spawn_blocking(move || secrets::unlock(&passphrase))
+        .await
+        .map_err(|e| CmdError::new("ERROR", e.to_string()))??;
+    if ok {
+        Ok(())
+    } else {
+        Err(CmdError::new("BAD_PASSPHRASE", "That isn't the master passphrase."))
+    }
+}
+
+/// Set a master passphrase, moving every saved secret into the encrypted vault.
+#[tauri::command]
+async fn vault_enable(state: State<'_, AppState>, passphrase: String) -> CmdResult<()> {
+    let ids: Vec<String> = state.store.list_sessions()?.into_iter().map(|s| s.id).collect();
+    tauri::async_runtime::spawn_blocking(move || secrets::enable(&passphrase, &ids))
+        .await
+        .map_err(|e| CmdError::new("ERROR", e.to_string()))??;
+    Ok(())
+}
+
+#[tauri::command]
+async fn vault_change(passphrase: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || secrets::change(&passphrase))
+        .await
+        .map_err(|e| CmdError::new("ERROR", e.to_string()))??;
+    Ok(())
+}
+
+/// Remove the master passphrase, moving saved secrets back to the system keychain.
+#[tauri::command]
+fn vault_disable() -> CmdResult<()> {
+    Ok(secrets::disable()?)
+}
+
+/// For a forgotten passphrase: drop the vault and the secrets in it.
+#[tauri::command]
+fn vault_reset() -> CmdResult<()> {
+    Ok(secrets::reset()?)
 }
 
 #[tauri::command]
@@ -477,6 +535,9 @@ fn set_logging(state: State<AppState>, conn_id: String, enabled: bool) -> CmdRes
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let store = Store::locate().expect("could not open Tether's data directory");
+    if let Err(e) = secrets::init(store.root()) {
+        log::error!("couldn't read the saved-password vault: {e:#}");
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -531,6 +592,12 @@ pub fn run() {
             data_dir,
             window_ready,
             set_title_bar_colors,
+            vault_status,
+            vault_unlock,
+            vault_enable,
+            vault_change,
+            vault_disable,
+            vault_reset,
             trust_host_key,
             connect,
             write,

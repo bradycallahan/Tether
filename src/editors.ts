@@ -6,6 +6,7 @@ import { describeSend } from "./escapes";
 import { SCHEMES, scheme } from "./schemes";
 import { store } from "./state";
 import { compileRules } from "./highlight";
+import { securityPanel } from "./vault";
 import type { IconName } from "./commands";
 import {
   defaultProtocol,
@@ -382,7 +383,7 @@ function loginStepsEditor(s: Session) {
   const help = h("div", { class: "hint-block" },
     h("p", {}, "Each step waits until the device shows the text (case doesn't matter), then sends the reply. Leave “Wait for” empty to send as soon as output settles."),
     h("p", {}, h("code", {}, "\\r"), " presses Enter, ", h("code", {}, "\\p"), " pauses half a second, ", h("code", {}, "^C"), " sends Ctrl+C. ",
-      h("code", {}, "{username}"), ", ", h("code", {}, "{password}"), " and ", h("code", {}, "{enable}"), " are filled in from the session and the system keychain, so passwords never appear here."),
+      h("code", {}, "{username}"), ", ", h("code", {}, "{password}"), " and ", h("code", {}, "{enable}"), " are filled in from the session and its saved passwords, so passwords never appear here."),
   );
   const el = h("div", { class: "stack-12" },
     rows,
@@ -443,7 +444,7 @@ export async function editSession(original: Session, opts: { isNew: boolean; pag
       saved.password = saved.enable = false;
       forget.hidden = true;
       renderCredNote();
-      toast("Saved passwords removed from the keychain.");
+      toast("Saved passwords removed.");
     },
   });
   forget.hidden = true;
@@ -458,14 +459,14 @@ export async function editSession(original: Session, opts: { isNew: boolean; pag
   );
   const renderCredNote = () => {
     const k = proto.kind();
-    const kept = "Saved in the keychain \u2014 type to replace";
+    const kept = "Saved \u2014 type to replace";
     credBox.hidden = k === "local";
     loginUserField.hidden = k === "ssh";
     password.placeholder = saved.password ? kept : k === "ssh" ? "Asked when connecting" : "Not saved";
     enable.placeholder = saved.enable ? kept : "Not saved";
     credNote.textContent = k === "ssh"
-      ? "Saved to your system keychain, never to Tether's files. Leave the password blank to be asked each time. The enable password is used by login actions."
-      : "Saved to your system keychain. Login actions send them with {username}, {password} and {enable}.";
+      ? "Saved encrypted, never in Tether's session files. Leave the password blank to be asked each time. The enable password is used by login actions."
+      : "Saved encrypted. Login actions send them with {username}, {password} and {enable}.";
   };
   if (!opts.isNew) {
     api.secretStatus(s.id).then((st) => {
@@ -704,7 +705,7 @@ export async function quickConnectDialog(kind: ProtocolKind = "ssh"): Promise<{ 
 // ---------------------------------------------------------------------------
 // Settings
 
-export type SettingsPage = "appearance" | "terminal" | "highlighting" | "buttons" | "files";
+export type SettingsPage = "appearance" | "terminal" | "highlighting" | "buttons" | "files" | "security";
 
 export async function editSettings(
   actions: { importSecureCrt: () => void; editBars: () => void; editHighlights: () => void },
@@ -808,8 +809,9 @@ export async function editSettings(
         ),
       ),
     },
+    { name: "Security", icon: "lock", el: securityPanel() },
   ]);
-  const pages: SettingsPage[] = ["appearance", "terminal", "highlighting", "buttons", "files"];
+  const pages: SettingsPage[] = ["appearance", "terminal", "highlighting", "buttons", "files", "security"];
   if (page) cats.show(Math.max(0, pages.indexOf(page)));
 
   return modal((done) => ({

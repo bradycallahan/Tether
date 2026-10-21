@@ -232,7 +232,7 @@ fn read_toml<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> Result<T> {
 }
 
 /// Write to a temp file then rename, so a crash never leaves half a file.
-fn atomic_write(path: &Path, contents: &str) -> Result<()> {
+pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, contents)?;
     fs::rename(&tmp, path)?;

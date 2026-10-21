@@ -131,7 +131,7 @@ export async function promptSecret(o: {
     intro: o.intro,
     body: [
       h("label", { class: `field ${o.error ? "error" : ""}` }, h("span", {}, o.label), input, o.error ? h("span", { class: "err" }, o.error) : null),
-      o.allowRemember ? check("Save in the system keychain", remember) : null,
+      o.allowRemember ? check("Save password", remember) : null,
     ].filter(Boolean) as Node[],
     foot: [button("Cancel", { onclick: () => done(undefined) }), button("Connect", { kind: "primary", submit: true })],
     onSubmit: () => done({ value: input.value, remember: o.allowRemember && remember.checked }),

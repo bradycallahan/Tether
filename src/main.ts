@@ -16,6 +16,7 @@ import { TabManager, type Tab, type TabState } from "./tabs";
 import { hostLabel, newSession, PROTOCOL_NAMES, type ButtonBar, type HighlightSet, type Protocol, type Session, type Settings, type ShellInfo } from "./types";
 import { Welcome } from "./welcome";
 import { guardWebview, setWindowTheme } from "./platform";
+import { offerAtFirstRun, unlockAtStartup } from "./vault";
 
 const MANY_TABS = 8;
 
@@ -70,11 +71,17 @@ class App {
     if (!isMac) this.altTapsMenuBar();
     guardWebview();
     addEventListener("focus", () => this.tabs.active?.tabEl.classList.remove("unread"));
+    // Saved passwords must be unlocked before restored tabs connect with them.
+    if ((await api.vaultStatus().catch(() => undefined))?.enabled) {
+      await api.windowReady().catch(() => {});
+      await unlockAtStartup();
+    }
     this.restoreWorkspace();
     this.guardClose();
     store.shells().then((list) => (this.shells = list));
     // The window starts hidden; show it once this first frame has painted.
     requestAnimationFrame(() => requestAnimationFrame(() => api.windowReady().catch(() => {})));
+    setTimeout(() => offerAtFirstRun(), 400);
   }
 
   applyTheme() {
@@ -778,7 +785,7 @@ class App {
   async saveEdited(r: SessionEditResult) {
     await store.saveSession(r.session);
     for (const [kind, value] of Object.entries(r.secrets)) {
-      await api.setSecret(r.session.id, kind as keyof SessionEditResult["secrets"], value).catch((e) => toast(e?.message ?? "Couldn't save to the system keychain."));
+      await api.setSecret(r.session.id, kind as keyof SessionEditResult["secrets"], value).catch((e) => toast(e?.message ?? "Couldn't save the password."));
     }
     for (const t of this.tabs.tabs) if (t.saved && t.session.id === r.session.id) t.updateSession(r.session);
   }

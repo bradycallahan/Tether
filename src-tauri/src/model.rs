@@ -267,6 +267,8 @@ pub struct Settings {
     pub show_toolbar: bool,
     pub show_sidebar: bool,
     pub show_status_bar: bool,
+    /// The master passphrase has been offered (once, at first run).
+    pub vault_offered: bool,
 }
 
 impl Default for Settings {
@@ -299,6 +301,7 @@ impl Default for Settings {
             show_toolbar: true,
             show_sidebar: true,
             show_status_bar: true,
+            vault_offered: false,
         }
     }
 }
