@@ -57,6 +57,8 @@ All notable changes to Tether are listed here. The format follows [Keep a Change
 - Local shells whose path has spaces in it (`C:\Program Files\Git\bin\bash.exe`) start; quote the path, or paste it bare
 
 ### Changed
+
+- Connection failures say what happened in plain words ("Nothing answered on 10.0.0.1 port 2222…", "Couldn't find sw1…") instead of the raw operating-system message
 - Windows: the title bar follows Tether's light or dark theme, scrollbars are the thin Windows 11 overlay kind, and the browser's form suggestions no longer drop down under host and user fields
 - The button bar starts hidden on new installs; turn it on from View > Button bar
 - Windows: menus use Windows 11 proportions

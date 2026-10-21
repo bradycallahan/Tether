@@ -176,7 +176,7 @@ pub async fn start(
     let stream = tokio::time::timeout(Duration::from_secs(15), TcpStream::connect((host.as_str(), port)))
         .await
         .map_err(|_| CmdError::new("TIMEOUT", format!("{host}:{port} did not answer within 15 seconds.")))?
-        .map_err(|e| CmdError::new("CONNECT", format!("Could not connect to {host}:{port}: {e}")))?;
+        .map_err(|e| crate::conn::connect_error(&host, port, Some(&e), &e))?;
     let _ = stream.set_nodelay(true);
     let (mut rd, mut wr) = stream.into_split();
     let proto = std::sync::Arc::new(parking_lot::Mutex::new(Telnet::new(&term, cols, rows)));

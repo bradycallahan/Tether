@@ -153,3 +153,51 @@ impl From<std::io::Error> for CmdError {
 }
 
 pub type CmdResult<T> = Result<T, CmdError>;
+
+/// A failed TCP connect, in words a network admin can act on. The OS text
+/// ("actively refused it. (os error 10061)") goes in `detail` for the record.
+pub fn connect_error(host: &str, port: u16, io: Option<&std::io::Error>, raw: &dyn std::fmt::Display) -> CmdError {
+    use std::io::ErrorKind::*;
+    let raw = raw.to_string();
+    // Name lookups fail with an uncategorized error: WSAHOST_NOT_FOUND / WSANO_DATA
+    // on Windows, a getaddrinfo message elsewhere.
+    let lookup = io.and_then(|e| e.raw_os_error()).is_some_and(|c| c == 11001 || c == 11004)
+        || raw.contains("failed to lookup address");
+    let message = match io.map(|e| e.kind()) {
+        _ if lookup => format!("Couldn't find {host}. Check the name, or use its IP address."),
+        Some(ConnectionRefused) => {
+            format!("Nothing answered on {host} port {port}. Check the port, or that the service is running there.")
+        }
+        Some(HostUnreachable | NetworkUnreachable) => {
+            format!("{host} can't be reached from this computer. Check the address, VPN or routing.")
+        }
+        Some(ConnectionReset | ConnectionAborted) => {
+            format!(
+                "{host} closed the connection on port {port} at once. A firewall or access list may be blocking it."
+            )
+        }
+        Some(TimedOut) => format!("{host}:{port} did not answer within 15 seconds."),
+        _ => format!("Could not connect to {host}:{port}: {raw}"),
+    };
+    CmdError::new("CONNECT", message).with_detail(serde_json::json!({ "os": raw }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::connect_error;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn connect_errors_are_plain() {
+        let refused = Error::from(ErrorKind::ConnectionRefused);
+        let e = connect_error("10.0.0.1", 2222, Some(&refused), &refused);
+        assert_eq!(
+            e.message,
+            "Nothing answered on 10.0.0.1 port 2222. Check the port, or that the service is running there."
+        );
+        let dns = Error::other("failed to lookup address information: Name or service not known");
+        assert!(connect_error("sw1", 22, Some(&dns), &dns).message.starts_with("Couldn't find sw1."));
+        let odd = Error::other("something else");
+        assert_eq!(connect_error("h", 23, Some(&odd), &odd).message, "Could not connect to h:23: something else");
+    }
+}
