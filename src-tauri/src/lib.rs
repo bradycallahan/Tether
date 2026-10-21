@@ -3,6 +3,7 @@
 pub mod conn;
 pub mod expect;
 pub mod import;
+pub mod launch;
 pub mod local;
 pub mod logger;
 pub mod model;
@@ -21,7 +22,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use store::Store;
 use tauri::ipc::Channel;
-use tauri::{Manager as _, State};
+use tauri::{Emitter as _, Manager as _, State};
+use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::mpsc;
 
@@ -29,6 +31,8 @@ struct AppState {
     store: Store,
     manager: Manager,
     placement: window::Placement,
+    /// What the command line asked to open, until the UI is ready for it.
+    launch: parking_lot::Mutex<Vec<launch::Target>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +269,34 @@ fn window_ready(win: tauri::WebviewWindow, state: State<AppState>) {
 #[tauri::command]
 fn set_title_bar_colors(win: tauri::WebviewWindow, caption: String, text: String) {
     window::set_title_bar_colors(&win, &caption, &text);
+}
+
+/// What Tether was started to open; handed over once, after the workspace is restored.
+#[tauri::command]
+fn take_launch_targets(state: State<AppState>) -> Vec<launch::Target> {
+    std::mem::take(&mut *state.launch.lock())
+}
+
+/// Whether ssh:// and telnet:// links open in Tether. None where the OS doesn't
+/// let an app register itself (macOS registers through the bundle instead).
+#[tauri::command]
+fn link_handler_status(app: tauri::AppHandle) -> Option<bool> {
+    let dl = app.deep_link();
+    let mut all = true;
+    for scheme in launch::SCHEMES {
+        all &= dl.is_registered(scheme).ok()?;
+    }
+    Some(all)
+}
+
+#[tauri::command]
+fn set_link_handler(app: tauri::AppHandle, on: bool) -> CmdResult<()> {
+    let dl = app.deep_link();
+    for scheme in launch::SCHEMES {
+        let r = if on { dl.register(scheme) } else { dl.unregister(scheme) };
+        r.map_err(|e| CmdError::new("LINKS", format!("Windows didn't accept the change: {e}")))?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -543,9 +575,27 @@ pub fn run() {
         log::error!("couldn't read the saved-password vault: {e:#}");
     }
     tauri::Builder::default()
+        // First, so a second launch exits before doing any other work.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.unminimize();
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+            let targets = launch::targets(argv.into_iter().skip(1));
+            if !targets.is_empty() {
+                let _ = app.emit_to("main", "open-targets", targets);
+            }
+        }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(AppState { store, manager: Manager::default(), placement: window::Placement::default() })
+        .manage(AppState {
+            store,
+            manager: Manager::default(),
+            placement: window::Placement::default(),
+            launch: parking_lot::Mutex::new(launch::targets(std::env::args().skip(1))),
+        })
         .setup(|app| {
             if let Some(win) = app.get_webview_window("main") {
                 let state = app.state::<AppState>();
@@ -596,6 +646,9 @@ pub fn run() {
             data_dir,
             window_ready,
             set_title_bar_colors,
+            take_launch_targets,
+            link_handler_status,
+            set_link_handler,
             vault_status,
             vault_unlock,
             vault_enable,

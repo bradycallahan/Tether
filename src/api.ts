@@ -1,5 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
-import type { ButtonBar, HighlightSet, ImportReport, PortInfo, SecretKind, Session, Settings, ShellInfo, StatusEvent, Workspace } from "./types";
+import type { ButtonBar, HighlightSet, ImportReport, LaunchTarget, PortInfo, SecretKind, Session, Settings, ShellInfo, StatusEvent, Workspace } from "./types";
 
 export const api = {
   listSessions: () => invoke<Session[]>("list_sessions"),
@@ -20,6 +20,9 @@ export const api = {
   /** An empty value removes the secret. */
   setSecret: (id: string, kind: SecretKind, value: string) => invoke<void>("set_secret", { id, kind, value }),
   forgetSecrets: (id: string) => invoke<void>("forget_secrets", { id }),
+  takeLaunchTargets: () => invoke<LaunchTarget[]>("take_launch_targets"),
+  linkHandlerStatus: () => invoke<boolean | null>("link_handler_status"),
+  setLinkHandler: (on: boolean) => invoke<void>("set_link_handler", { on }),
   vaultStatus: () => invoke<{ enabled: boolean; unlocked: boolean }>("vault_status"),
   vaultUnlock: (passphrase: string) => invoke<void>("vault_unlock", { passphrase }),
   vaultEnable: (passphrase: string) => invoke<void>("vault_enable", { passphrase }),

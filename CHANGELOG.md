@@ -34,6 +34,9 @@ All notable changes to Tether are listed here. The format follows [Keep a Change
 - Ctrl+F4 closes the tab, as in other Windows apps
 - The command window takes several lines: Ctrl+Enter adds a line, and each line is sent with its own Enter
 - View > Always on top
+- Opening Tether again brings the running window forward instead of starting a second copy
+- `tether --session "Folder/name"` opens a saved session, and `tether ssh://admin@10.0.0.1` opens an address (in the running window if Tether is already open)
+- Settings > Files can make Tether the handler for ssh:// and telnet:// links, so links in browsers and tickets open a tab. A link to a saved device uses that session
 - Optional master passphrase: saved passwords, key passphrases and enable passwords are encrypted with a passphrase only you know (Argon2id and AES-256-GCM, in `vault.toml`), and Tether asks for it at startup. It's offered once on first run, and can be set, changed or removed under Settings > Security. Without one, saved passwords stay in the system credential store as before
 - Session options, New session, Quick connect, Settings, button bar and keyword highlighting editors open in their own windows, which stay above the main window like SecureCRT's dialogs
 - The window title says when the tab in front isn't connected ("core-sw1 (Not connected) - Tether"), so it shows on the taskbar and in Alt+Tab

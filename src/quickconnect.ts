@@ -81,6 +81,47 @@ function hostProtocol(kind: "ssh" | "telnet" | "raw", rest: string): Protocol | 
   return p;
 }
 
+/**
+ * An ssh:// or telnet:// link from a browser or another app. Only those two
+ * schemes: a link must never open a local shell or a serial port. SSH URI
+ * extras (";fingerprint=…" in the user part, a path) are ignored.
+ */
+export function parseLink(url: string): Protocol | null {
+  const m = /^(ssh|telnet):\/\/([^/?#]*)/i.exec(url.trim());
+  if (!m) return null;
+  let authority: string;
+  try {
+    authority = decodeURIComponent(m[2]);
+  } catch {
+    return null;
+  }
+  const at = authority.lastIndexOf("@");
+  const user = at >= 0 ? authority.slice(0, at).split(";")[0].split(":")[0] : "";
+  const hostPart = at >= 0 ? authority.slice(at + 1) : authority;
+  if (!hostPart || /\s/.test(hostPart + user)) return null;
+  return hostProtocol(m[1].toLowerCase() as "ssh" | "telnet", user ? `${user}@${hostPart}` : hostPart);
+}
+
+/** A saved session named on the command line: by id, "Folder/Name", or name. */
+export function findSession<T extends Rankable & { id: string }>(query: string, sessions: T[]): T | undefined {
+  const q = query.trim().toLowerCase();
+  return (
+    sessions.find((s) => s.id === query.trim()) ??
+    sessions.find((s) => [s.folder, s.name].filter(Boolean).join("/").toLowerCase() === q) ??
+    sessions.find((s) => s.name.toLowerCase() === q)
+  );
+}
+
+/** The saved session a link points at, so its saved settings and credentials are used. */
+export function savedFor<T extends Rankable>(p: Protocol, sessions: T[]): T | undefined {
+  if (p.kind !== "ssh" && p.kind !== "telnet") return undefined;
+  return sessions.find((s) => {
+    const q = s.protocol;
+    if (q.kind !== p.kind || q.host.toLowerCase() !== p.host.toLowerCase() || q.port !== p.port) return false;
+    return p.kind !== "ssh" || !p.username || (q.kind === "ssh" && q.username === p.username);
+  });
+}
+
 interface Rankable {
   name: string;
   folder: string;

@@ -145,6 +145,9 @@ export interface StatusEvent {
   message: string;
 }
 
+/** Something the command line or a link asked Tether to open (launch.rs). */
+export type LaunchTarget = { kind: "session"; value: string } | { kind: "url"; value: string };
+
 export interface CmdError {
   code: string;
   message: string;

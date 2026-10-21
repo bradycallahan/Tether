@@ -754,6 +754,24 @@ export async function editSettings(
   });
   const dataDir = h("span", { class: "mono path" }, "…");
   api.dataDir().then((d) => (dataDir.textContent = d)).catch(() => {});
+  // Applies at once (it's a system setting, not part of Tether's own settings file).
+  const links = h("input", { type: "checkbox" });
+  const linksRow = check("Open ssh:// and telnet:// links with Tether", links, "Links in browsers, tickets and wikis open a tab here. Turning this off removes Tether as the handler; another app installed for all users takes over again.");
+  linksRow.hidden = true;
+  api.linkHandlerStatus().then((on) => {
+    if (on === null) return;
+    links.checked = on;
+    linksRow.hidden = false;
+  }).catch(() => {});
+  links.addEventListener("change", () => {
+    api.setLinkHandler(links.checked).then(
+      () => toast(links.checked ? "ssh:// and telnet:// links now open in Tether." : "Tether no longer opens ssh:// and telnet:// links."),
+      (e) => {
+        links.checked = !links.checked;
+        toast(e?.message ?? "Couldn't change the link handler.");
+      },
+    );
+  });
 
   const cats = categories([
     {
@@ -813,6 +831,7 @@ export async function editSettings(
           button("Open log folder", { onclick: () => api.openFolder("logs") }),
           button(h("span", { class: "inline" }, icon("import"), "Import SecureCRT sessions…"), { onclick: actions.importSecureCrt }),
         ),
+        linksRow,
       ),
     },
     { name: "Security", icon: "lock", el: securityPanel() },

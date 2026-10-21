@@ -1,5 +1,7 @@
 import "./styles.css";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
+import { findSession, parseLink, savedFor } from "./quickconnect";
 import { api } from "./api";
 import { commands, isMac, type Command } from "./commands";
 import { clear, h, icon } from "./dom";
@@ -13,7 +15,7 @@ import { Omnibox } from "./omnibox";
 import { draggedSessionIds, isSessionDrag, quickSession, Sidebar } from "./sidebar";
 import { folderName, isUnder, joinFolder, store } from "./state";
 import { TabManager, type Tab, type TabState } from "./tabs";
-import { hostLabel, newSession, PROTOCOL_NAMES, type ButtonBar, type HighlightSet, type Protocol, type Session, type Settings, type ShellInfo } from "./types";
+import { hostLabel, newSession, PROTOCOL_NAMES, type LaunchTarget, type ButtonBar, type HighlightSet, type Protocol, type Session, type Settings, type ShellInfo } from "./types";
 import { Welcome } from "./welcome";
 import { guardWebview, setWindowTheme } from "./platform";
 import { offerAtFirstRun, unlockAtStartup } from "./vault";
@@ -77,6 +79,10 @@ class App {
       await unlockAtStartup();
     }
     this.restoreWorkspace();
+    // A jump-list entry, shortcut or ssh:// link Tether was started with; later
+    // ones arrive from a second launch, which hands them over and exits.
+    api.takeLaunchTargets().then((t) => this.openTargets(t)).catch(() => {});
+    listen<LaunchTarget[]>("open-targets", (e) => this.openTargets(e.payload)).catch(() => {});
     this.guardClose();
     store.shells().then((list) => (this.shells = list));
     // The window starts hidden; show it once this first frame has painted.
@@ -764,6 +770,25 @@ class App {
 
   // ---------------------------------------------------------------------------
   // Sessions
+
+  openTargets(list: LaunchTarget[]) {
+    for (const t of list) {
+      if (t.kind === "session") {
+        const s = findSession(t.value, store.sessions);
+        if (s) this.openSessions([s]);
+        else toast(`There's no saved session called ${t.value}.`);
+        continue;
+      }
+      const p = parseLink(t.value);
+      if (!p) {
+        toast(`Tether can't open ${t.value.slice(0, 80)}: it isn't a valid ssh:// or telnet:// address.`);
+        continue;
+      }
+      const saved = savedFor(p, store.sessions);
+      if (saved) this.openSessions([saved]);
+      else this.tabs.open(quickSession(p), false);
+    }
+  }
 
   async openSessions(list: Session[], opts: { tile?: boolean } = {}) {
     if (!list.length) return;

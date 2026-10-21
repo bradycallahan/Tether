@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { describeSend, parseSendString } from "../src/escapes";
-import { parseQuickConnect } from "../src/quickconnect";
+import { findSession, parseLink, parseQuickConnect, savedFor } from "../src/quickconnect";
+import { newSession, type Protocol } from "../src/types";
 
 describe("send strings", () => {
   it("expands escapes and control characters", () => {
@@ -43,5 +44,36 @@ describe("quick connect", () => {
     expect(parseQuickConnect("local")).toMatchObject({ kind: "local", shell: "" });
     expect(parseQuickConnect("host:99999")).toBeNull();
     expect(parseQuickConnect("   ")).toBeNull();
+  });
+});
+
+describe("links and launch targets", () => {
+  it("parses ssh and telnet links", () => {
+    expect(parseLink("ssh://admin@10.0.0.1:2222")).toMatchObject({ kind: "ssh", host: "10.0.0.1", port: 2222, username: "admin" });
+    expect(parseLink("ssh://core-sw1/")).toMatchObject({ kind: "ssh", host: "core-sw1", port: 22, username: "" });
+    expect(parseLink("SSH://net%40ops;fingerprint=ssh-ed25519-abc@[2001:db8::1]:22")).toMatchObject({ host: "2001:db8::1", username: "net@ops" });
+    expect(parseLink("telnet://ts1:2003/")).toMatchObject({ kind: "telnet", host: "ts1", port: 2003 });
+  });
+  it("refuses anything that isn't a network link", () => {
+    expect(parseLink("local://bash")).toBeNull();
+    expect(parseLink("raw://host:7000")).toBeNull();
+    expect(parseLink("ssh://")).toBeNull();
+    expect(parseLink("ssh://host:99999")).toBeNull();
+    expect(parseLink("ssh://bad%zz@host")).toBeNull();
+  });
+  it("finds saved sessions by id, path or name", () => {
+    const list = [newSession({ name: "core-sw1", folder: "Campus/Core" }), newSession({ name: "edge-fw1" })];
+    expect(findSession("campus/core/CORE-SW1", list)).toBe(list[0]);
+    expect(findSession("edge-fw1", list)).toBe(list[1]);
+    expect(findSession(list[1].id, list)).toBe(list[1]);
+    expect(findSession("nope", list)).toBeUndefined();
+  });
+  it("matches a link to the saved session for that device", () => {
+    const ssh = (host: string, username: string, port = 22) => ({ kind: "ssh", host, port, username, auth: { method: "password" }, jumpSession: null, legacyAlgorithms: false, keepaliveSecs: 30 }) as Protocol;
+    const list = [newSession({ name: "a", protocol: ssh("core-sw1", "netops") })];
+    expect(savedFor(parseLink("ssh://CORE-SW1")!, list)).toBe(list[0]);
+    expect(savedFor(parseLink("ssh://netops@core-sw1")!, list)).toBe(list[0]);
+    expect(savedFor(parseLink("ssh://admin@core-sw1")!, list)).toBeUndefined();
+    expect(savedFor(parseLink("ssh://core-sw1:2222")!, list)).toBeUndefined();
   });
 });

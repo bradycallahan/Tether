@@ -36,6 +36,7 @@ const sess = (name: string, folder: string, protocol: Args, extra: Args = {}) =>
 const empty = new URLSearchParams(location.search).has("empty");
 const vault = { enabled: new URLSearchParams(location.search).has("locked"), unlocked: false };
 let vaultPassphrase = "preview passphrase";
+let linkHandler = false;
 
 const db = {
   sessions: empty
@@ -254,6 +255,9 @@ const handlers: Record<string, (a: Args) => unknown> = {
   },
   forget_secrets: ({ id }) => void db.secrets.delete(id),
   // ?locked starts with a master passphrase set ("preview passphrase") and locked.
+  take_launch_targets: () => [],
+  link_handler_status: () => linkHandler,
+  set_link_handler: ({ on }) => void (linkHandler = on),
   vault_status: () => ({ ...vault }),
   vault_unlock: ({ passphrase }) => {
     if (passphrase !== vaultPassphrase) throw { code: "BAD_PASSPHRASE", message: "That isn't the master passphrase." };
