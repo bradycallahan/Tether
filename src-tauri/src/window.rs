@@ -98,6 +98,14 @@ pub fn show<R: Runtime>(win: &WebviewWindow<R>, placement: &Placement) {
     let _ = win.set_focus();
 }
 
+/// Show a dialog window (see `dialogwin.ts`) once its page has painted.
+pub fn show_dialog<R: Runtime>(win: &WebviewWindow<R>) {
+    #[cfg(windows)]
+    harden_webview(win);
+    let _ = win.show();
+    let _ = win.set_focus();
+}
+
 /// The window's bounds if it's in its normal state (not maximized, minimized,
 /// full screen or hidden).
 fn normal_bounds<R: Runtime>(win: &WebviewWindow<R>) -> Option<WindowPlacement> {

@@ -1,7 +1,7 @@
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
 import { clear, h, icon } from "./dom";
-import { button, check, field, modal, toast } from "./dialogs";
+import { alertDialog, button, check, confirmDialog, field, modal, toast } from "./dialogs";
 import { describeSend } from "./escapes";
 import { SCHEMES, scheme } from "./schemes";
 import { store } from "./state";
@@ -1097,4 +1097,97 @@ export async function editHighlights(): Promise<HighlightSet[] | undefined> {
     foot: [button("Cancel", { onclick: () => done(undefined) }), button("Save", { kind: "primary", submit: true })],
     onSubmit: () => done(sets.map((s) => ({ ...s, name: s.name.trim() || "Untitled", rules: s.rules.filter((r) => r.pattern) }))),
   }));
+}
+
+// ---------------------------------------------------------------------------
+// SecureCRT import
+
+/** Pick SecureCRT's Sessions folder and add what's new in it to the library. */
+export async function importSecureCrt() {
+  const proceed = await confirmDialog({
+    title: "Import SecureCRT sessions",
+    message: h("span", {},
+      "Choose SecureCRT's Sessions folder. On Windows it's usually ",
+      h("span", { class: "mono" }, "%APPDATA%\\VanDyke\\Config\\Sessions"),
+      ", and on macOS ",
+      h("span", { class: "mono" }, "~/Library/Application Support/VanDyke/SecureCRT/Config/Sessions"),
+      ". Hosts, ports, usernames, serial settings and folders come across; saved passwords don't."),
+    confirm: "Choose folder…",
+  });
+  if (!proceed) return;
+  const dir = await openDialog({ directory: true, multiple: false, title: "SecureCRT Sessions folder" });
+  if (typeof dir !== "string") return;
+  try {
+    const report = await api.importSecureCrt(dir);
+    if (!report.sessions.length) {
+      await alertDialog("Nothing to import", report.skipped.length ? `Skipped ${report.skipped.length} file(s) with unsupported protocols.` : "No session files were found in that folder. Make sure it's the Sessions folder itself.");
+      return;
+    }
+    const existing = new Set(store.sessions.map((s) => `${s.folder}/${s.name}`.toLowerCase()));
+    const fresh = report.sessions.filter((s) => !existing.has(`${s.folder}/${s.name}`.toLowerCase()));
+    const dupes = report.sessions.length - fresh.length;
+    if (!fresh.length) {
+      await alertDialog("Already imported", `All ${report.sessions.length} sessions in that folder are already in your library.`);
+      return;
+    }
+    const ok = await modal<boolean>((done) => ({
+      title: `Import ${fresh.length} session${fresh.length === 1 ? "" : "s"}?`,
+      body: h("div", { class: "callout" },
+        h("div", {}, `${report.sessions.length} found.`),
+        dupes ? h("div", {}, `${dupes} already exist with the same name and folder and will be left alone.`) : null,
+        report.skipped.length ? h("div", {}, `${report.skipped.length} skipped (unsupported protocols such as TAPI or RLogin).`) : null,
+      ),
+      foot: [h("button", { type: "button", class: "btn", onclick: () => done(false) }, "Cancel"), h("button", { type: "submit", class: "btn primary" }, `Import ${fresh.length}`)],
+      onSubmit: () => done(true),
+    }));
+    if (ok) {
+      await store.saveSessions(fresh);
+      toast(`Imported ${fresh.length} session${fresh.length === 1 ? "" : "s"}`);
+    }
+  } catch (e) {
+    await alertDialog("Import failed", (e as { message?: string }).message ?? String(e));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dialog windows
+
+/** Each options dialog, as something that can be sent to its own window. */
+export type DialogRequest =
+  | { kind: "session"; session: Session; isNew: boolean; page?: "login" }
+  | { kind: "quick"; protocol?: ProtocolKind }
+  | { kind: "settings"; page?: SettingsPage }
+  | { kind: "bars"; bar?: string }
+  | { kind: "button"; bar: string; index: number | null }
+  | { kind: "highlights" };
+
+/** Run a dialog in this page. Editors opened from Settings save their own changes. */
+export function runDialog(r: DialogRequest): Promise<unknown> {
+  switch (r.kind) {
+    case "session":
+      return editSession(r.session, { isNew: r.isNew, page: r.page });
+    case "quick":
+      return quickConnectDialog(r.protocol);
+    case "settings":
+      return editSettings(
+        {
+          importSecureCrt,
+          editBars: async () => {
+            const bars = await editButtonBars();
+            if (bars) await store.saveBars(bars);
+          },
+          editHighlights: async () => {
+            const sets = await editHighlights();
+            if (sets) await store.saveHighlights(sets);
+          },
+        },
+        r.page,
+      );
+    case "bars":
+      return editButtonBars(r.bar);
+    case "button":
+      return editButton(r.bar, r.index);
+    case "highlights":
+      return editHighlights();
+  }
 }

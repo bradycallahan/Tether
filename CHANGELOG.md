@@ -34,6 +34,8 @@ All notable changes to Tether are listed here. The format follows [Keep a Change
 - Ctrl+F4 closes the tab, as in other Windows apps
 - The command window takes several lines: Ctrl+Enter adds a line, and each line is sent with its own Enter
 - View > Always on top
+- Session options, New session, Quick connect, Settings, button bar and keyword highlighting editors open in their own windows, which stay above the main window like SecureCRT's dialogs
+- The window title says when the tab in front isn't connected ("core-sw1 (Not connected) - Tether"), so it shows on the taskbar and in Alt+Tab
 - Windows 11: the title bar takes the app's own chrome color in both themes, so it no longer looks like a separate strip
 - A shell picker for local-shell sessions and an "Other shells" menu, listing the shells found on this computer: PowerShell 7, Windows PowerShell, Command Prompt, each WSL distribution and Git Bash on Windows; the shells in /etc/shells elsewhere. Local tabs are named after their shell
 

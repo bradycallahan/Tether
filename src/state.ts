@@ -1,7 +1,7 @@
 import { api } from "./api";
 import type { ButtonBar, HighlightSet, Session, Settings, ShellInfo, Workspace } from "./types";
 
-type Topic = "sessions" | "bars" | "highlights" | "settings" | "recent";
+export type Topic = "sessions" | "bars" | "highlights" | "settings" | "recent";
 
 const RECENT_MAX = 12;
 
@@ -14,6 +14,8 @@ class Store {
   /** Folders created explicitly (possibly empty). */
   explicitFolders: string[] = [];
   workspace: Workspace = { tabs: [], active: 0, tiled: false, recent: [] };
+  /** In a dialog window: passes each change on to the main window. */
+  relay: ((topic: Topic) => void) | undefined;
   private listeners = new Map<Topic, Set<() => void>>();
   private workspaceTimer: number | undefined;
   private shellList: Promise<ShellInfo[]> | undefined;
@@ -42,6 +44,17 @@ class Store {
 
   emit(topic: Topic) {
     this.listeners.get(topic)?.forEach((fn) => fn());
+    this.relay?.(topic);
+  }
+
+  /** Re-read one part of the library after another window changed it. */
+  async reload(topic: Topic) {
+    if (topic === "sessions") [this.sessions, this.explicitFolders] = await Promise.all([api.listSessions(), api.getFolders().catch(() => [])]);
+    else if (topic === "bars") this.bars = await api.getButtonBars();
+    else if (topic === "highlights") this.highlights = await api.getHighlights();
+    else if (topic === "settings") this.settings = await api.getSettings();
+    else return;
+    this.emit(topic);
   }
 
   session(id: string | null | undefined) {

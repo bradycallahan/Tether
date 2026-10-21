@@ -1,11 +1,11 @@
 import "./styles.css";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "./api";
 import { commands, isMac, type Command } from "./commands";
 import { clear, h, icon } from "./dom";
-import { alertDialog, confirmDialog, modal, promptText, toast } from "./dialogs";
-import { editButton, editButtonBars, editHighlights, editSession, editSettings, quickConnectDialog, type SessionEditResult, type SettingsPage } from "./editors";
+import { confirmDialog, promptText, toast } from "./dialogs";
+import { dialogRequest, followDialogChanges, inWindow, runDialogWindow } from "./dialogwin";
+import { importSecureCrt, runDialog, type DialogRequest, type SessionEditResult, type SettingsPage } from "./editors";
 import { aboutDialog, referenceDialog, shortcutsDialog } from "./help";
 import { closeMenus, cmd, menuOpen, menuPoint, showMenu, type MenuEntry, type MenuItem } from "./menu";
 import { MenuBar, Toolbar, type MenuDef } from "./menubar";
@@ -13,7 +13,7 @@ import { Omnibox } from "./omnibox";
 import { draggedSessionIds, isSessionDrag, quickSession, Sidebar } from "./sidebar";
 import { folderName, isUnder, joinFolder, store } from "./state";
 import { TabManager, type Tab, type TabState } from "./tabs";
-import { hostLabel, newSession, PROTOCOL_NAMES, type Protocol, type Session, type Settings, type ShellInfo } from "./types";
+import { hostLabel, newSession, PROTOCOL_NAMES, type ButtonBar, type HighlightSet, type Protocol, type Session, type Settings, type ShellInfo } from "./types";
 import { Welcome } from "./welcome";
 import { guardWebview, setWindowTheme } from "./platform";
 
@@ -43,6 +43,7 @@ class App {
   shells: ShellInfo[] = [];
   historyPos = -1;
   private uptimeTimer: number | undefined;
+  private windowTitle = "";
   private lastActive: Tab | null = null;
   /** True until the last workspace has been read back, so startup doesn't overwrite it. */
   private restoring = true;
@@ -63,6 +64,7 @@ class App {
     store.on("highlights", () => this.tabs.tabs.forEach((t) => t.applyHighlightSet()));
     store.on("bars", () => this.renderBars());
     store.on("sessions", () => this.refresh());
+    followDialogChanges();
     matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => this.applyTheme());
     addEventListener("keydown", (e) => this.shortcut(e), true);
     if (!isMac) this.altTapsMenuBar();
@@ -526,7 +528,7 @@ class App {
   }
 
   async editOneButton(index: number | null) {
-    const bars = await editButton(this.currentBar ?? store.bars[0]?.name ?? "My buttons", index);
+    const bars = await dialog<ButtonBar[]>({ kind: "button", bar: this.currentBar ?? store.bars[0]?.name ?? "My buttons", index });
     if (bars) {
       await store.saveBars(bars);
       if (!this.currentBar) this.currentBar = bars[0]?.name ?? null;
@@ -536,13 +538,13 @@ class App {
   }
 
   async editBars() {
-    const bars = await editButtonBars(this.currentBar ?? undefined);
+    const bars = await dialog<ButtonBar[]>({ kind: "bars", bar: this.currentBar ?? undefined });
     if (bars) await store.saveBars(bars);
     this.focusTerminal();
   }
 
   async editHl() {
-    const sets = await editHighlights();
+    const sets = await dialog<HighlightSet[]>({ kind: "highlights" });
     if (sets) await store.saveHighlights(sets);
   }
 
@@ -644,7 +646,7 @@ class App {
     const live = this.tabs.tabs.filter((x) => x.state === "connected").length;
     if (!t) {
       this.statusEl.append(h("span", { class: "seg" }, `${store.sessions.length} saved session${store.sessions.length === 1 ? "" : "s"}`));
-      getCurrentWindow().setTitle("Tether").catch(() => {});
+      this.setWindowTitle("Tether");
       return;
     }
     const stateClass = t.state === "connected" ? "on" : t.state === "connecting" ? "warn" : t.state === "closed" ? "bad" : "";
@@ -662,7 +664,16 @@ class App {
       h("span", { class: "seg dim", title: "Columns × rows" }, `${t.term.cols}×${t.term.rows}`),
     ];
     this.statusEl.append(...segs.filter((x): x is HTMLElement => !!x));
-    getCurrentWindow().setTitle(`${t.title} — Tether`).catch(() => {});
+    // Like SecureCRT, the title says when the tab in front isn't connected,
+    // so it shows on the taskbar and in Alt+Tab too.
+    const state = t.state === "connected" ? "" : t.state === "connecting" ? " (Connecting)" : " (Not connected)";
+    this.setWindowTitle(`${t.title}${state} - Tether`);
+  }
+
+  setWindowTitle(title: string) {
+    if (title === this.windowTitle) return;
+    this.windowTitle = title;
+    getCurrentWindow().setTitle(title).catch(() => {});
   }
 
   /** The connected-for clock runs only while a connected tab is in front. */
@@ -773,7 +784,7 @@ class App {
   }
 
   async create(folder: string, base?: Session) {
-    const r = await editSession(base ? { ...base, folder } : newSession({ folder }), { isNew: true });
+    const r = await dialog<SessionEditResult>({ kind: "session", session: base ? { ...base, folder } : newSession({ folder }), isNew: true });
     if (!r) return this.focusTerminal();
     await this.saveEdited(r);
     this.sidebar.reveal(r.session.id);
@@ -781,7 +792,7 @@ class App {
   }
 
   async edit(s: Session) {
-    const r = await editSession(s, { isNew: false });
+    const r = await dialog<SessionEditResult>({ kind: "session", session: s, isNew: false });
     if (!r) return;
     await this.saveEdited(r);
     if (r.connect) this.openSessions([r.session]);
@@ -789,7 +800,7 @@ class App {
 
   async editFromTab(tab: Tab, page?: "login") {
     const existing = tab.saved ? store.session(tab.session.id) : undefined;
-    const r = await editSession(existing ?? tab.session, { isNew: !existing, page });
+    const r = await dialog<SessionEditResult>({ kind: "session", session: existing ?? tab.session, isNew: !existing, page });
     if (!r) return this.focusTerminal();
     await this.saveEdited(r);
     tab.updateSession(r.session);
@@ -807,7 +818,7 @@ class App {
 
   async duplicate(s: Session) {
     const copy = { ...structuredClone(s), id: crypto.randomUUID(), name: `${s.name} copy` };
-    const r = await editSession(copy, { isNew: true });
+    const r = await dialog<SessionEditResult>({ kind: "session", session: copy, isNew: true });
     if (!r) return;
     await this.saveEdited(r);
     this.sidebar.reveal(r.session.id);
@@ -864,7 +875,7 @@ class App {
   }
 
   async quickConnect(kind?: Protocol["kind"]) {
-    const r = await quickConnectDialog(kind);
+    const r = await dialog<{ session: Session; save: boolean }>({ kind: "quick", protocol: kind });
     if (!r) return this.focusTerminal();
     if (r.save) {
       await store.saveSession(r.session);
@@ -876,62 +887,13 @@ class App {
   }
 
   async openSettings(page?: SettingsPage) {
-    const s = await editSettings(
-      {
-        importSecureCrt: () => this.importSecureCrt(),
-        editBars: () => this.editBars(),
-        editHighlights: () => this.editHl(),
-      },
-      page,
-    );
+    const s = await dialog<Settings>({ kind: "settings", page });
     if (s) await store.saveSettings(s);
     this.focusTerminal();
   }
 
-  async importSecureCrt() {
-    const proceed = await confirmDialog({
-      title: "Import SecureCRT sessions",
-      message: h("span", {},
-        "Choose SecureCRT's Sessions folder. On Windows it's usually ",
-        h("span", { class: "mono" }, "%APPDATA%\\VanDyke\\Config\\Sessions"),
-        ", and on macOS ",
-        h("span", { class: "mono" }, "~/Library/Application Support/VanDyke/SecureCRT/Config/Sessions"),
-        ". Hosts, ports, usernames, serial settings and folders come across; saved passwords don't."),
-      confirm: "Choose folder…",
-    });
-    if (!proceed) return;
-    const dir = await openDialog({ directory: true, multiple: false, title: "SecureCRT Sessions folder" });
-    if (typeof dir !== "string") return;
-    try {
-      const report = await api.importSecureCrt(dir);
-      if (!report.sessions.length) {
-        await alertDialog("Nothing to import", report.skipped.length ? `Skipped ${report.skipped.length} file(s) with unsupported protocols.` : "No session files were found in that folder. Make sure it's the Sessions folder itself.");
-        return;
-      }
-      const existing = new Set(store.sessions.map((s) => `${s.folder}/${s.name}`.toLowerCase()));
-      const fresh = report.sessions.filter((s) => !existing.has(`${s.folder}/${s.name}`.toLowerCase()));
-      const dupes = report.sessions.length - fresh.length;
-      if (!fresh.length) {
-        await alertDialog("Already imported", `All ${report.sessions.length} sessions in that folder are already in your library.`);
-        return;
-      }
-      const ok = await modal<boolean>((done) => ({
-        title: `Import ${fresh.length} session${fresh.length === 1 ? "" : "s"}?`,
-        body: h("div", { class: "callout" },
-          h("div", {}, `${report.sessions.length} found.`),
-          dupes ? h("div", {}, `${dupes} already exist with the same name and folder and will be left alone.`) : null,
-          report.skipped.length ? h("div", {}, `${report.skipped.length} skipped (unsupported protocols such as TAPI or RLogin).`) : null,
-        ),
-        foot: [h("button", { type: "button", class: "btn", onclick: () => done(false) }, "Cancel"), h("button", { type: "submit", class: "btn primary" }, `Import ${fresh.length}`)],
-        onSubmit: () => done(true),
-      }));
-      if (ok) {
-        await store.saveSessions(fresh);
-        toast(`Imported ${fresh.length} session${fresh.length === 1 ? "" : "s"}`);
-      }
-    } catch (e) {
-      await alertDialog("Import failed", (e as { message?: string }).message ?? String(e));
-    }
+  importSecureCrt() {
+    return importSecureCrt();
   }
 
   // ---------------------------------------------------------------------------
@@ -1171,7 +1133,13 @@ function subsequence(hay: string, w: string): boolean {
   return i === w.length;
 }
 
-new App().start().catch((e) => {
+/** Show an options dialog in its own window and wait for its result. */
+function dialog<T>(req: DialogRequest): Promise<T | undefined> {
+  return inWindow(req, () => runDialog(req) as Promise<T | undefined>);
+}
+
+const request = dialogRequest<DialogRequest>();
+(request ? runDialogWindow(request, runDialog) : new App().start()).catch((e) => {
   document.body.textContent = `Tether couldn't start: ${e?.message ?? e}`;
   console.error(e);
 });

@@ -32,5 +32,22 @@ export function getCurrentWindow() {
     destroy: async () => {
       document.body.textContent = "Tether closed (preview).";
     },
+    // Enough for a dialog window (#dialog=… in the URL) to lay itself out.
+    setEnabled: async (_on: boolean) => {},
+    setFocus: async () => {},
+    show: async () => {},
+    setSize: async (s: LogicalSize) => console.debug("preview: window size", s.width, s.height),
+    setMinSize: async (_s: LogicalSize) => {},
+    setPosition: async (_p: LogicalPosition) => {},
   };
 }
+
+export class LogicalSize {
+  constructor(public width: number, public height: number) {}
+}
+
+export class LogicalPosition {
+  constructor(public x: number, public y: number) {}
+}
+
+export type ScrollBarStyle = "default" | "fluentOverlay";

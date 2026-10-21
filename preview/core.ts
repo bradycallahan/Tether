@@ -4,6 +4,9 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+/** Dialogs open in the page in the preview, not in windows of their own. */
+export const isTauri = () => false;
+
 export class Channel<T> {
   onmessage: (m: T) => void = () => {};
 }

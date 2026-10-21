@@ -414,6 +414,7 @@ dialog {
 }
 dialog.wide { width: min(760px, calc(100vw - 32px)); }
 dialog::backdrop { background: rgba(8, 11, 15, 0.55); }
+
 dialog form { display: flex; flex-direction: column; max-height: calc(100vh - 50px); margin: 0; }
 .dlg-head { padding: 16px 18px 4px; }
 .dlg-head h1 { margin: 0; font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
@@ -427,6 +428,15 @@ dialog form { display: flex; flex-direction: column; max-height: calc(100vh - 50
 dialog.catdialog { width: min(880px, calc(100vw - 32px)); height: min(640px, calc(100vh - 48px)); }
 dialog.catdialog form { height: 100%; }
 dialog.catdialog .dlg-body { padding: 0; flex: 1; min-height: 0; overflow: hidden; border-top: 1px solid var(--rule); margin-top: 12px; display: block; }
+
+/* A dialog in its own window (dialogwin.ts) is the whole window, titled by the OS. */
+dialog.in-window, dialog.catdialog.in-window { width: 100vw; height: 100vh; max-width: none; max-height: none; margin: 0; border: 0; border-radius: 0; box-shadow: none; }
+dialog.in-window::backdrop { background: none; }
+dialog.in-window form { height: 100%; max-height: none; }
+dialog.in-window > form > .dlg-head h1 { display: none; }
+dialog.in-window > form > .dlg-head:not(:has(p, span)) { display: none; }
+dialog.in-window .dlg-body { flex: 1; min-height: 0; }
+dialog.catdialog.in-window .dlg-body { margin-top: 0; border-top: 0; }
 .catdlg { display: grid; grid-template-columns: 180px minmax(0, 1fr); height: 100%; }
 .catnav { display: flex; flex-direction: column; gap: 1px; padding: 10px 8px; background: var(--rack); border-right: 1px solid var(--rule); overflow: auto; }
 :root[data-theme="light"] .catnav { background: var(--panel); }

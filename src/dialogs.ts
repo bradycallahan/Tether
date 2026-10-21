@@ -13,6 +13,14 @@ export interface DialogParts {
   onSubmit?: () => void;
 }
 
+/** Set by a dialog window (dialogwin.ts): the next modal fills that window
+ * instead of floating over the page, and is handed over to be sized and shown. */
+let windowHost: ((dlg: HTMLDialogElement, title: string) => void) | undefined;
+
+export function hostNextModal(host: (dlg: HTMLDialogElement, title: string) => void) {
+  windowHost = host;
+}
+
 /**
  * Show a modal. `build` receives `done(value)`; pressing Escape resolves
  * with `undefined`. Returns whatever was passed to `done`.
@@ -49,8 +57,11 @@ export function modal<T>(build: (done: (v: T | undefined) => void) => DialogPart
       e.preventDefault();
       done(undefined);
     });
+    const host = windowHost;
+    windowHost = undefined;
     document.body.append(dlg);
     dlg.showModal();
+    host?.(dlg, parts.title);
     const target = parts.focus ?? (dlg.querySelector("input:not([type=checkbox]), textarea, select") as HTMLElement | null) ?? (dlg.querySelector(".btn.primary") as HTMLElement | null);
     target?.focus();
     if (target instanceof HTMLInputElement) target.select();

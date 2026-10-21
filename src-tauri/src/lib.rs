@@ -193,7 +193,11 @@ fn data_dir(state: State<AppState>) -> String {
 /// appears blank or flashes white.
 #[tauri::command]
 fn window_ready(win: tauri::WebviewWindow, state: State<AppState>) {
-    window::show(&win, &state.placement);
+    if win.label() == "main" {
+        window::show(&win, &state.placement);
+    } else {
+        window::show_dialog(&win);
+    }
 }
 
 #[tauri::command]
@@ -492,6 +496,10 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|win, event| {
+            // Only the main window's placement is remembered; dialogs centre on it.
+            if win.label() != "main" {
+                return;
+            }
             if let Some(webview) = win.app_handle().get_webview_window(win.label()) {
                 let state = webview.state::<AppState>();
                 window::on_event(&webview, event, &state.store, &state.placement);
