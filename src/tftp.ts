@@ -172,7 +172,8 @@ export class Tftp {
       this.el.className = "seg tftp on";
       this.el.append(h("span", { class: "led connected" }), `TFTP ${serverAddress(s) ?? "ready"}`);
     }
-    this.el.title = s?.running ? "TFTP server: addresses, folder and transfers" : "";
+    // No tooltip while the panel is open: it would sit on top of the panel's buttons.
+    this.el.title = s?.running && !this.panel ? "TFTP server: addresses, folder and transfers" : "";
     if (this.panel) this.fillPanel();
   }
 
@@ -184,6 +185,7 @@ export class Tftp {
     this.panel = h("div", { class: "tftp-panel", role: "dialog", "aria-label": "TFTP server", tabindex: "-1" });
     document.body.append(this.panel);
     this.el.setAttribute("aria-expanded", "true");
+    this.el.title = "";
     this.fillPanel();
     this.place();
     addEventListener("pointerdown", this.outside, true);
@@ -199,6 +201,7 @@ export class Tftp {
     this.panel.remove();
     this.panel = null;
     this.el.setAttribute("aria-expanded", "false");
+    this.render();
     removeEventListener("pointerdown", this.outside, true);
     removeEventListener("keydown", this.onKey, true);
     removeEventListener("resize", this.closePanel);
