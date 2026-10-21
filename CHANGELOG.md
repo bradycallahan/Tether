@@ -29,6 +29,9 @@ All notable changes to Tether are listed here. The format follows [Keep a Change
 - Tap Alt to reach the menu bar, then a menu's underlined letter to open it (Alt, F for File), as in other Windows apps. Alt with a letter still goes to the device as Meta
 - The Menu key and Shift+F10 open the context menu of whatever has focus: the terminal, a tab, a session or folder in the tree. In the terminal the Menu key always opens the menu, even with right-click paste on
 - Windows High Contrast themes: selection and focus use the system colors, and the port LEDs keep their colors
+- Shift+click a button-bar button to send it to every connected tab, after a confirmation naming how many
+- A second tab to the same device is titled "core-sw1 (2)"
+- Ctrl+F4 closes the tab, as in other Windows apps
 - A shell picker for local-shell sessions and an "Other shells" menu, listing the shells found on this computer: PowerShell 7, Windows PowerShell, Command Prompt, each WSL distribution and Git Bash on Windows; the shells in /etc/shells elsewhere. Local tabs are named after their shell
 
 ### Fixed

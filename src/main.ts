@@ -116,7 +116,7 @@ class App {
       { id: "log.toggle", label: "Log session", icon: "log", detail: "Log this tab to a file", keys: ["Mod+Shift+L"], enabled: connected, checked: () => !!active()?.logPath, run: () => active()?.toggleLogging() },
       { id: "log.openFolder", label: "Open log folder", run: () => api.openFolder("logs") },
       { id: "import.securecrt", label: "Import from SecureCRT…", icon: "import", run: () => this.importSecureCrt() },
-      { id: "tab.close", label: "Close tab", keys: ["Mod+Shift+W"], macKeys: ["Meta+W"], enabled: has, run: () => active() && this.tabs.close(active()!) },
+      { id: "tab.close", label: "Close tab", keys: ["Mod+Shift+W", "Ctrl+F4"], macKeys: ["Meta+W"], enabled: has, run: () => active() && this.tabs.close(active()!) },
       { id: "app.quit", label: isMac ? "Quit Tether" : "Exit", run: () => getCurrentWindow().close() },
       // Edit
       { id: "edit.copy", label: "Copy", icon: "copy", keys: ["Mod+Shift+C", "Ctrl+Insert"], macKeys: ["Meta+C"], enabled: () => !!active()?.term.hasSelection(), run: () => active()?.copySelection() },
@@ -460,8 +460,8 @@ class App {
       const btn = h("button", {
         type: "button",
         class: "sbtn",
-        title: `Sends ${b.send}`,
-        onclick: () => this.tabs.sendString(b.send),
+        title: `Sends ${b.send}\nShift+click sends it to every connected tab`,
+        onclick: (e: MouseEvent) => this.tabs.sendString(b.send, e.shiftKey),
         onpointerdown: (e: Event) => e.preventDefault(),
         oncontextmenu: (e: MouseEvent) => {
           e.preventDefault();

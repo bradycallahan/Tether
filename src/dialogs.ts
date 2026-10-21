@@ -76,11 +76,11 @@ export function button(label: string | Node, opts: { kind?: "primary" | "danger"
   );
 }
 
-export async function confirmDialog(o: { title: string; message: string | Node; confirm: string; danger?: boolean; cancel?: string }): Promise<boolean> {
+export async function confirmDialog(o: { title: string; message: string | Node; confirm: string; danger?: boolean; warn?: boolean; cancel?: string }): Promise<boolean> {
   const r = await modal<boolean>((done) => ({
     title: o.title,
     intro: o.message,
-    foot: [button(o.cancel ?? "Cancel", { onclick: () => done(false) }), button(o.confirm, { kind: o.danger ? "danger solid" : "primary", submit: true })],
+    foot: [button(o.cancel ?? "Cancel", { onclick: () => done(false) }), button(o.confirm, { kind: o.danger ? "danger solid" : o.warn ? "warn" : "primary", submit: true })],
     onSubmit: () => done(true),
   }));
   return r === true;

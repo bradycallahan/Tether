@@ -15,7 +15,7 @@ import { Highlighter } from "./highlight";
 import { fromKeyboard, menuPoint, showMenu, type MenuEntry } from "./menu";
 import { scheme } from "./schemes";
 import { store } from "./state";
-import { playSendString } from "./escapes";
+import { describeSend, playSendString } from "./escapes";
 import { requestAttention } from "./platform";
 import { hostLabel, PROTOCOL_NAMES, type CmdError, type Session, type StatusEvent } from "./types";
 
@@ -854,6 +854,13 @@ export class TabManager implements TabHost {
     if (opts.activate !== false || !this.active) this.activate(tab);
     tab.mount();
     tab.applySettings();
+    // A second tab to the same device reads "core-sw1 (2)", so the strip tells them apart.
+    const taken = new Set(this.tabs.filter((t) => t !== tab).map((t) => t.title));
+    if (taken.has(tab.title)) {
+      let n = 2;
+      while (taken.has(`${tab.title} (${n})`)) n++;
+      tab.setTitle(`${tab.title} (${n})`, false);
+    }
     if (opts.connect !== false) {
       // Wait a frame so the terminal has measured itself before we report a size.
       requestAnimationFrame(() => requestAnimationFrame(() => tab.connect()));
@@ -933,8 +940,18 @@ export class TabManager implements TabHost {
     return this.active.state === "connected" ? [this.active] : [];
   }
 
-  async sendString(str: string) {
-    const targets = this.targets();
+  /** Send to the usual targets, or with `everywhere` to every connected tab (after a confirmation when that's more than one). */
+  async sendString(str: string, everywhere = false) {
+    const targets = everywhere ? this.tabs.filter((t) => t.state === "connected") : this.targets();
+    if (everywhere && targets.length > 1) {
+      const ok = await confirmDialog({
+        title: `Send to all ${targets.length} connected tabs?`,
+        message: h("span", {}, "Sends ", h("code", {}, describeSend(str)), " to every connected tab, not only this one."),
+        confirm: `Send to ${targets.length} tabs`,
+        warn: true,
+      });
+      if (!ok) return;
+    }
     if (!targets.length) {
       toast(this.active ? "This tab isn't connected. Press Enter in it to reconnect." : "Open a session first.");
       return;
