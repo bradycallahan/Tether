@@ -119,15 +119,19 @@ struct SecretStatus {
     password: bool,
     passphrase: bool,
     enable: bool,
+    /// Saved but behind a master passphrase that hasn't been entered this run.
+    locked: bool,
 }
 
 #[tauri::command]
 fn secret_status(id: String) -> SecretStatus {
-    let has = |kind| secrets::get(&id, kind).ok().flatten().is_some();
+    let has = |kind| secrets::exists(&id, kind);
+    let (enabled, unlocked) = secrets::vault_status();
     SecretStatus {
         password: has(secrets::PASSWORD),
         passphrase: has(secrets::PASSPHRASE),
         enable: has(secrets::ENABLE),
+        locked: enabled && !unlocked,
     }
 }
 

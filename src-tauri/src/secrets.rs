@@ -103,6 +103,16 @@ pub fn get(session_id: &str, kind: &str) -> Result<Option<String>> {
     }
 }
 
+/// Whether a secret is saved, even while the vault is locked (entry names
+/// aren't secret; only their values are encrypted).
+pub fn exists(session_id: &str, kind: &str) -> bool {
+    let n = name(session_id, kind);
+    match STATE.lock().as_ref() {
+        Some(State { vault: Some(open), .. }) => open.vault.entries.contains_key(&n),
+        _ => os_get(&n).ok().flatten().is_some(),
+    }
+}
+
 pub fn delete(session_id: &str, kind: &str) -> Result<()> {
     let n = name(session_id, kind);
     let mut guard = STATE.lock();

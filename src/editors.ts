@@ -436,7 +436,7 @@ export async function editSession(original: Session, opts: { isNew: boolean; pag
   const password = h("input", { type: "password", autocomplete: "off" });
   const enable = h("input", { type: "password", autocomplete: "off" });
   const credNote = h("span", { class: "hint" });
-  const saved = { password: false, enable: false };
+  const saved = { password: false, enable: false, locked: false };
   const forget = button("Forget saved passwords", {
     kind: "danger",
     onclick: async () => {
@@ -462,9 +462,14 @@ export async function editSession(original: Session, opts: { isNew: boolean; pag
     const kept = "Saved \u2014 type to replace";
     credBox.hidden = k === "local";
     loginUserField.hidden = k === "ssh";
-    password.placeholder = saved.password ? kept : k === "ssh" ? "Asked when connecting" : "Not saved";
-    enable.placeholder = saved.enable ? kept : "Not saved";
-    credNote.textContent = k === "ssh"
+    // A locked vault can't take new values, and a blank field mustn't look like nothing is saved.
+    const locked = "Saved, locked until you enter your master passphrase";
+    password.placeholder = saved.password ? (saved.locked ? locked : kept) : k === "ssh" ? "Asked when connecting" : "Not saved";
+    enable.placeholder = saved.enable ? (saved.locked ? locked : kept) : "Not saved";
+    password.disabled = enable.disabled = saved.locked;
+    credNote.textContent = saved.locked
+      ? "Saved passwords are locked. Unlock them under Settings > Security to change them; connecting still asks for anything it needs."
+      : k === "ssh"
       ? "Saved encrypted, never in Tether's session files. Leave the password blank to be asked each time. The enable password is used by login actions."
       : "Saved encrypted. Login actions send them with {username}, {password} and {enable}.";
   };
@@ -472,6 +477,7 @@ export async function editSession(original: Session, opts: { isNew: boolean; pag
     api.secretStatus(s.id).then((st) => {
       saved.password = st.password;
       saved.enable = st.enable;
+      saved.locked = st.locked;
       forget.hidden = !(st.password || st.passphrase || st.enable);
       renderCredNote();
     }).catch(() => {});

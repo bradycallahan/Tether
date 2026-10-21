@@ -247,7 +247,7 @@ const handlers: Record<string, (a: Args) => unknown> = {
     db.workspace = workspace;
     localStorage.setItem("preview.workspace", JSON.stringify(workspace));
   },
-  secret_status: ({ id }) => ({ password: !!db.secrets.get(id)?.has("password"), passphrase: false, enable: !!db.secrets.get(id)?.has("enable") }),
+  secret_status: ({ id }) => ({ password: !!db.secrets.get(id)?.has("password"), passphrase: false, enable: !!db.secrets.get(id)?.has("enable"), locked: vault.enabled && !vault.unlocked }),
   set_secret: ({ id, kind }) => {
     if (!db.secrets.has(id)) db.secrets.set(id, new Set());
     db.secrets.get(id)!.add(kind);

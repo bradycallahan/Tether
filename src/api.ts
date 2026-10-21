@@ -16,7 +16,7 @@ export const api = {
   saveFolders: (folders: string[]) => invoke<void>("save_folders", { folders }),
   getWorkspace: () => invoke<Workspace>("get_workspace"),
   saveWorkspace: (workspace: Workspace) => invoke<void>("save_workspace", { workspace }),
-  secretStatus: (id: string) => invoke<Record<SecretKind, boolean>>("secret_status", { id }),
+  secretStatus: (id: string) => invoke<Record<SecretKind | "locked", boolean>>("secret_status", { id }),
   /** An empty value removes the secret. */
   setSecret: (id: string, kind: SecretKind, value: string) => invoke<void>("set_secret", { id, kind, value }),
   forgetSecrets: (id: string) => invoke<void>("forget_secrets", { id }),
