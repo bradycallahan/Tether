@@ -3,6 +3,7 @@
 pub mod conn;
 pub mod expect;
 pub mod import;
+pub mod jumplist;
 pub mod launch;
 pub mod local;
 pub mod logger;
@@ -269,6 +270,12 @@ fn window_ready(win: tauri::WebviewWindow, state: State<AppState>) {
 #[tauri::command]
 fn set_title_bar_colors(win: tauri::WebviewWindow, caption: String, text: String) {
     window::set_title_bar_colors(&win, &caption, &text);
+}
+
+/// Recent sessions for the taskbar jump list (Windows).
+#[tauri::command]
+fn set_jump_list(entries: Vec<jumplist::Entry>) {
+    jumplist::set(entries);
 }
 
 /// What Tether was started to open; handed over once, after the workspace is restored.
@@ -647,6 +654,7 @@ pub fn run() {
             window_ready,
             set_title_bar_colors,
             take_launch_targets,
+            set_jump_list,
             link_handler_status,
             set_link_handler,
             vault_status,

@@ -20,6 +20,7 @@ export const api = {
   /** An empty value removes the secret. */
   setSecret: (id: string, kind: SecretKind, value: string) => invoke<void>("set_secret", { id, kind, value }),
   forgetSecrets: (id: string) => invoke<void>("forget_secrets", { id }),
+  setJumpList: (entries: { id: string; name: string; detail: string }[]) => invoke<void>("set_jump_list", { entries }),
   takeLaunchTargets: () => invoke<LaunchTarget[]>("take_launch_targets"),
   linkHandlerStatus: () => invoke<boolean | null>("link_handler_status"),
   setLinkHandler: (on: boolean) => invoke<void>("set_link_handler", { on }),

@@ -67,6 +67,14 @@ class App {
     store.on("highlights", () => this.tabs.tabs.forEach((t) => t.applyHighlightSet()));
     store.on("bars", () => this.renderBars());
     store.on("sessions", () => this.refresh());
+    // The taskbar jump list follows recent sessions (and their names).
+    let jumpTimer: number | undefined;
+    const jump = () => {
+      clearTimeout(jumpTimer);
+      jumpTimer = window.setTimeout(() => this.updateJumpList(), 500);
+    };    store.on("recent", jump);
+    store.on("sessions", jump);
+    jump();
     followDialogChanges();
     matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => this.applyTheme());
     addEventListener("keydown", (e) => this.shortcut(e), true);
@@ -770,6 +778,11 @@ class App {
 
   // ---------------------------------------------------------------------------
   // Sessions
+
+  updateJumpList() {
+    const recent = store.recentSessions().slice(0, 10);
+    api.setJumpList(recent.map((s) => ({ id: s.id, name: s.name, detail: `${PROTOCOL_NAMES[s.protocol.kind]} ${hostLabel(s.protocol)}` }))).catch(() => {});
+  }
 
   openTargets(list: LaunchTarget[]) {
     for (const t of list) {

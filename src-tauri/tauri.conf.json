@@ -45,6 +45,15 @@
     "publisher": "Brady Callahan",
     "copyright": "Copyright © 2026 Brady Callahan. MIT License.",
     "homepage": "https://github.com/bradycallahan/Tether",
-    "longDescription": "Tether is an open-source terminal for network and systems administrators: SSH, Telnet, raw TCP, serial consoles and local shells, with a saved-session library."
+    "longDescription": "Tether is an open-source terminal for network and systems administrators: SSH, Telnet, raw TCP, serial consoles and local shells, with a saved-session library.",
+    "licenseFile": "../LICENSE",
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "icons/installer/header.bmp",
+        "sidebarImage": "icons/installer/sidebar.bmp",
+        "installMode": "currentUser"
+      }
+    }
   }
 }

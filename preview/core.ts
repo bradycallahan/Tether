@@ -256,6 +256,7 @@ const handlers: Record<string, (a: Args) => unknown> = {
   forget_secrets: ({ id }) => void db.secrets.delete(id),
   // ?locked starts with a master passphrase set ("preview passphrase") and locked.
   take_launch_targets: () => [],
+  set_jump_list: () => undefined,
   link_handler_status: () => linkHandler,
   set_link_handler: ({ on }) => void (linkHandler = on),
   vault_status: () => ({ ...vault }),

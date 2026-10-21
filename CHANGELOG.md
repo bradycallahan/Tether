@@ -34,6 +34,8 @@ All notable changes to Tether are listed here. The format follows [Keep a Change
 - Ctrl+F4 closes the tab, as in other Windows apps
 - The command window takes several lines: Ctrl+Enter adds a line, and each line is sent with its own Enter
 - View > Always on top
+- Windows: right-click Tether on the taskbar for your recent sessions
+- Windows installer: shows the license and Tether's own artwork, and installs for the current user without an admin prompt
 - Opening Tether again brings the running window forward instead of starting a second copy
 - `tether --session "Folder/name"` opens a saved session, and `tether ssh://admin@10.0.0.1` opens an address (in the running window if Tether is already open)
 - Settings > Files can make Tether the handler for ssh:// and telnet:// links, so links in browsers and tickets open a tab. A link to a saved device uses that session
