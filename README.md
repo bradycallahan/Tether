@@ -97,6 +97,8 @@ npm run tauri build    # installers in src-tauri/target/release/bundle/
 
 On Windows that produces an `.msi` and an NSIS `.exe` installer; on macOS a `.dmg`; on Linux `.deb`, `.rpm` and `.AppImage`. Pushing a tag like `v0.1.0` to GitHub builds all three platforms through the included workflow and attaches them to a draft release.
 
+**Windows notes:** install the Visual Studio 2022 Build Tools with the "Desktop development with C++" workload, Rust's `stable-x86_64-pc-windows-msvc` toolchain, and [NASM](https://www.nasm.us) (`winget install NASM.NASM`, then reopen the terminal) — the SSH library's crypto backend assembles with it. Without NASM, set `AWS_LC_SYS_PREBUILT_NASM=1` to use its prebuilt objects.
+
 **Linux notes:** serial ports need membership in the `dialout` group (`uucp` on some distros). Fedora needs `webkit2gtk4.1-devel`, `libudev-devel` and `openssl-devel` to build.
 
 ## Tests
