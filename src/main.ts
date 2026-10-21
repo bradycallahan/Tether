@@ -340,7 +340,7 @@ class App {
     this.setupSessionDrop(strip);
 
     // Command window
-    this.cmdInput = h("textarea", { rows: 1, placeholder: "Type a command and press Enter. Ctrl+Enter adds a line. Escapes like \\r and ^C work. Up and Down recall history.", spellcheck: "false", "aria-label": "Command window" });
+    this.cmdInput = h("textarea", { rows: 1, placeholder: "Type a command, then Enter. Ctrl+Enter adds a line, Up recalls history, escapes like \\r and ^C work.", spellcheck: "false", "aria-label": "Command window" });
     this.cmdInput.addEventListener("input", () => this.fitCmdInput());
     this.cmdTarget = h("button", { type: "button", class: "target", title: "Click to switch between this tab and broadcasting to checked tabs", onclick: () => this.toggleBroadcast(false) });
     this.cmdInput.addEventListener("keydown", (e) => this.cmdKey(e));
