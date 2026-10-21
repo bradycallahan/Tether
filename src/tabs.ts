@@ -684,7 +684,8 @@ export class Tab {
     const now = performance.now();
     if (now - this.lastPulse > 90) {
       this.lastPulse = now;
-      this.led.animate([{ background: "var(--activity)" }, { background: "var(--link)" }], { duration: 140 });
+      // One keyframe: the flash settles back on whatever the LED shows now (green, or blue when unread).
+      this.led.animate([{ background: "var(--activity)" }], { duration: 140 });
     }
     if (!this.host.isVisible(this)) {
       this.tabEl.classList.add("unread");
