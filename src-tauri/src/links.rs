@@ -1,108 +1,97 @@
-//! Making Tether the handler for `ssh://` and `telnet://` links on Windows.
+//! Offering Tether for `ssh://` and `telnet://` links on Windows.
 //!
-//! The deep-link plugin's `unregister` deletes the whole
-//! `HKCU\Software\Classes\<scheme>` key, including one another app made, so on
-//! Windows Tether edits the key itself: it remembers what was there before,
-//! and unticking the setting puts that back instead of deleting it.
+//! Windows 10 and 11 ignore an app that just writes `Classes\<scheme>`: the
+//! "Select an app" picker and Settings > Default apps only list apps that
+//! register capabilities. So Tether registers per user, the documented way:
+//!
+//! - a ProgID per scheme (`Tether.ssh`) with the open command,
+//! - `Software\Tether\Capabilities\URLAssociations` naming those ProgIDs,
+//! - a `RegisteredApplications` value pointing at the capabilities.
+//!
+//! It never touches `Classes\ssh` itself, so another app's handler is left
+//! alone, and only the user picks the default (Windows protects that choice).
+//! The uninstaller removes the same keys (`windows/hooks.nsh`).
 
 #[cfg(windows)]
 mod imp {
     use anyhow::Result;
-    use windows_registry::{Key, CURRENT_USER};
+    use windows_registry::CURRENT_USER;
 
-    /// Values Tether adds next to the handler so it can undo itself.
-    const CREATED: &str = "TetherCreated";
-    const PREV_COMMAND: &str = "TetherPreviousCommand";
-    const PREV_ICON: &str = "TetherPreviousIcon";
+    const APP: &str = "Tether";
+    const CAPABILITIES: &str = "Software\\Tether\\Capabilities";
+    const REGISTERED: &str = "Software\\RegisteredApplications";
 
-    fn base(scheme: &str) -> String {
-        format!("Software\\Classes\\{scheme}")
+    fn prog_id(scheme: &str) -> String {
+        format!("Tether.{scheme}")
     }
 
     fn exe() -> std::io::Result<String> {
-        let exe = std::env::current_exe()?;
-        // `\\?\` paths confuse the shell; strip the prefix like the plugin does.
-        let s = exe.display().to_string();
+        let s = std::env::current_exe()?.display().to_string();
+        // `\\?\` paths confuse the shell.
         Ok(s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s))
     }
 
-    fn command(exe: &str) -> String {
-        format!("\"{exe}\" \"%1\"")
-    }
-
-    fn default_of(key: &Key, path: &str) -> Option<String> {
-        key.open(path).ok()?.get_string("").ok()
-    }
-
-    pub fn is_registered(scheme: &str) -> Result<bool> {
+    /// Registered, and pointing at this copy of Tether.
+    pub fn is_registered(schemes: &[&str]) -> Result<bool> {
         let exe = exe()?;
-        Ok(default_of(CURRENT_USER, &format!("{}\\shell\\open\\command", base(scheme))).as_deref()
-            == Some(command(&exe).as_str()))
+        let listed = CURRENT_USER.open(REGISTERED).and_then(|k| k.get_string(APP)).is_ok();
+        Ok(listed
+            && schemes.iter().all(|s| {
+                CURRENT_USER
+                    .open(format!("Software\\Classes\\{}\\shell\\open\\command", prog_id(s)))
+                    .and_then(|k| k.get_string(""))
+                    .is_ok_and(|cmd| cmd == format!("\"{exe}\" \"%1\""))
+            }))
     }
 
-    pub fn register(scheme: &str) -> Result<()> {
-        if is_registered(scheme)? {
-            return Ok(());
-        }
+    pub fn register(schemes: &[&str]) -> Result<()> {
         let exe = exe()?;
-        let path = base(scheme);
-        let existed = CURRENT_USER.open(&path).is_ok();
-        let key = CURRENT_USER.create(&path)?;
-        if existed {
-            // Keep the other app's description; remember its command and icon.
-            if let Some(prev) = default_of(&key, "shell\\open\\command") {
-                key.set_string(PREV_COMMAND, prev)?;
-            }
-            if let Some(prev) = default_of(&key, "DefaultIcon") {
-                key.set_string(PREV_ICON, prev)?;
-            }
-        } else {
-            key.set_string("", format!("URL:{} Protocol", scheme.to_uppercase()))?;
-            key.set_string(CREATED, "1")?;
-        }
-        if key.get_string("URL Protocol").is_err() {
+        let caps = CURRENT_USER.create(CAPABILITIES)?;
+        caps.set_string("ApplicationName", APP)?;
+        caps.set_string("ApplicationDescription", "Terminal for network and systems administrators")?;
+        caps.set_string("ApplicationIcon", format!("{exe},0"))?;
+        let urls = caps.create("URLAssociations")?;
+        for scheme in schemes {
+            let id = prog_id(scheme);
+            let key = CURRENT_USER.create(format!("Software\\Classes\\{id}"))?;
+            key.set_string("", format!("{} link", scheme.to_uppercase()))?;
             key.set_string("URL Protocol", "")?;
+            key.create("DefaultIcon")?.set_string("", format!("{exe},0"))?;
+            key.create("shell\\open\\command")?.set_string("", format!("\"{exe}\" \"%1\""))?;
+            urls.set_string(scheme, &id)?;
         }
-        key.create("DefaultIcon")?.set_string("", format!("{exe},0"))?;
-        key.create("shell\\open\\command")?.set_string("", command(&exe))?;
+        CURRENT_USER.create(REGISTERED)?.set_string(APP, CAPABILITIES)?;
         Ok(())
     }
 
-    pub fn unregister(scheme: &str) -> Result<()> {
-        if !is_registered(scheme)? {
-            return Ok(());
+    pub fn unregister(schemes: &[&str]) -> Result<()> {
+        let registered = CURRENT_USER.create(REGISTERED)?;
+        if registered.get_string(APP).is_ok() {
+            registered.remove_value(APP)?;
         }
-        let path = base(scheme);
-        let key = CURRENT_USER.create(&path)?;
-        if key.get_string(CREATED).is_ok() {
-            return Ok(CURRENT_USER.remove_tree(&path)?);
+        for scheme in schemes {
+            let path = format!("Software\\Classes\\{}", prog_id(scheme));
+            if CURRENT_USER.open(&path).is_ok() {
+                CURRENT_USER.remove_tree(&path)?;
+            }
         }
-        restore(&key, &path, PREV_COMMAND, "shell\\open\\command")?;
-        restore(&key, &path, PREV_ICON, "DefaultIcon")?;
-        // Leave no empty `shell\open` behind if there was no command before.
-        for sub in ["shell\\open", "shell"] {
-            if let Ok(k) = key.open(sub) {
-                if k.keys()?.next().is_none() && k.values()?.next().is_none() {
-                    CURRENT_USER.remove_tree(format!("{path}\\{sub}"))?;
-                }
+        if CURRENT_USER.open(CAPABILITIES).is_ok() {
+            CURRENT_USER.remove_tree(CAPABILITIES)?;
+        }
+        // `Software\Tether` holds nothing else; drop it once it's empty.
+        if let Ok(k) = CURRENT_USER.open("Software\\Tether") {
+            if k.keys()?.next().is_none() && k.values()?.next().is_none() {
+                drop(k);
+                CURRENT_USER.remove_tree("Software\\Tether")?;
             }
         }
         Ok(())
-    }
-
-    /// Put back the value saved under `saved`, or remove `sub` if there was none.
-    fn restore(key: &Key, path: &str, saved: &str, sub: &str) -> Result<()> {
-        match key.get_string(saved) {
-            Ok(prev) => {
-                key.create(sub)?.set_string("", prev)?;
-                Ok(key.remove_value(saved)?)
-            }
-            // Deleted through HKCU itself: `key` lacks the DELETE right.
-            Err(_) if key.open(sub).is_ok() => Ok(CURRENT_USER.remove_tree(format!("{path}\\{sub}"))?),
-            Err(_) => Ok(()),
-        }
     }
 }
 
 #[cfg(windows)]
 pub use imp::{is_registered, register, unregister};
+
+/// Settings > Default apps, opened at Tether's page where Windows supports it.
+#[cfg(windows)]
+pub const DEFAULT_APPS: &str = "ms-settings:defaultapps?registeredAppUser=Tether";

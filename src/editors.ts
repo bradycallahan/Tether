@@ -7,6 +7,7 @@ import { SCHEMES, scheme } from "./schemes";
 import { store } from "./state";
 import { compileRules } from "./highlight";
 import { securityPanel } from "./vault";
+import { platform } from "./platform";
 import type { IconName } from "./commands";
 import {
   defaultProtocol,
@@ -755,19 +756,40 @@ export async function editSettings(
   const dataDir = h("span", { class: "mono path" }, "…");
   api.dataDir().then((d) => (dataDir.textContent = d)).catch(() => {});
   // Applies at once (it's a system setting, not part of Tether's own settings file).
+  // Windows doesn't let an app make itself the default: Tether offers itself,
+  // and the user picks it in Default apps (or the first time a link opens).
+  const win = platform === "windows";
   const links = h("input", { type: "checkbox" });
-  const linksRow = check("Open ssh:// and telnet:// links with Tether", links, "Links in browsers, tickets and wikis open a tab here. Turning this off removes Tether as the handler; another app installed for all users takes over again.");
+  const defaultApps = button("Open Default apps", { onclick: () => void api.openDefaultApps().catch((e) => toast(e?.message ?? String(e))) });
+  const linksRow = h("div", {},
+    check(
+      win ? "Offer Tether for ssh:// and telnet:// links" : "Open ssh:// and telnet:// links with Tether",
+      links,
+      win
+        ? "Links in browsers, tickets and wikis can open a tab here. Windows asks which app to use the first time you open one, or choose Tether in Settings > Default apps. Other apps' link settings aren't changed."
+        : "Links in browsers, tickets and wikis open a tab here. Turning this off removes Tether as the handler.",
+    ),
+    win ? h("div", { class: "inline under-check" }, defaultApps) : null,
+  );
   linksRow.hidden = true;
+  const syncLinks = () => (defaultApps.disabled = !links.checked);
   api.linkHandlerStatus().then((on) => {
     if (on === null) return;
     links.checked = on;
+    syncLinks();
     linksRow.hidden = false;
   }).catch(() => {});
   links.addEventListener("change", () => {
+    syncLinks();
     api.setLinkHandler(links.checked).then(
-      () => toast(links.checked ? "ssh:// and telnet:// links now open in Tether." : "Tether no longer opens ssh:// and telnet:// links."),
+      () => {
+        if (!links.checked) toast("Tether no longer offers to open ssh:// and telnet:// links.");
+        else if (win) toast("Tether is now offered for ssh:// and telnet:// links.", { action: { label: "Open Default apps", run: () => void api.openDefaultApps().catch(() => {}) } });
+        else toast("ssh:// and telnet:// links now open in Tether.");
+      },
       (e) => {
         links.checked = !links.checked;
+        syncLinks();
         toast(e?.message ?? "Couldn't change the link handler.");
       },
     );

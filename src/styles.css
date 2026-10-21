@@ -464,6 +464,8 @@ dialog.catdialog.in-window .dlg-body { margin-top: 0; border-top: 0; }
 .check .hint { grid-column: 2; }
 .inline { display: flex; gap: 6px; align-items: center; min-width: 0; }
 .inline.wrap { flex-wrap: wrap; }
+/* Follows a check(): lines up with its label and hint. */
+.inline.under-check { padding-left: 23px; margin-top: 4px; }
 .inline > input:not([type="checkbox"]), .inline > select { flex: 1; }
 .inline > input[style*="width"] { flex: none; }
 .callout { padding: 10px 12px; border-radius: var(--radius-m); background: var(--panel-2); border: 1px solid var(--rule); line-height: 1.5; }

@@ -24,6 +24,7 @@ export const api = {
   takeLaunchTargets: () => invoke<LaunchTarget[]>("take_launch_targets"),
   linkHandlerStatus: () => invoke<boolean | null>("link_handler_status"),
   setLinkHandler: (on: boolean) => invoke<void>("set_link_handler", { on }),
+  openDefaultApps: () => invoke<void>("open_default_apps"),
   vaultStatus: () => invoke<{ enabled: boolean; unlocked: boolean }>("vault_status"),
   vaultUnlock: (passphrase: string) => invoke<void>("vault_unlock", { passphrase }),
   vaultEnable: (passphrase: string) => invoke<void>("vault_enable", { passphrase }),

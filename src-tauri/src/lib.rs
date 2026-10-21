@@ -294,38 +294,61 @@ fn take_launch_targets(state: State<AppState>) -> Vec<launch::Target> {
     std::mem::take(&mut *state.launch.lock())
 }
 
-/// Whether ssh:// and telnet:// links open in Tether. None where the OS doesn't
-/// let an app register itself (macOS registers through the bundle instead).
+/// Whether Tether is set up for ssh:// and telnet:// links. None where the OS
+/// doesn't let an app register itself (macOS registers through the bundle).
+/// On Windows this means "offered": the user picks the default in Settings.
 #[tauri::command]
 fn link_handler_status(app: tauri::AppHandle) -> Option<bool> {
-    let mut all = true;
-    for scheme in launch::SCHEMES {
-        #[cfg(windows)]
-        let on = links::is_registered(scheme).ok()?;
-        #[cfg(not(windows))]
-        let on = app.deep_link().is_registered(scheme).ok()?;
-        all &= on;
-    }
     #[cfg(windows)]
-    let _ = app;
-    Some(all)
+    {
+        let _ = app;
+        links::is_registered(&launch::SCHEMES).ok()
+    }
+    #[cfg(not(windows))]
+    {
+        let dl = app.deep_link();
+        let mut all = true;
+        for scheme in launch::SCHEMES {
+            all &= dl.is_registered(scheme).ok()?;
+        }
+        Some(all)
+    }
 }
 
 #[tauri::command]
 fn set_link_handler(app: tauri::AppHandle, on: bool) -> CmdResult<()> {
-    for scheme in launch::SCHEMES {
-        // Windows: Tether's own registry code, which puts back another app's
-        // handler rather than deleting it (see links.rs).
-        #[cfg(windows)]
-        let r = if on { links::register(scheme) } else { links::unregister(scheme) }.map_err(|e| e.to_string());
-        #[cfg(not(windows))]
-        let r = if on { app.deep_link().register(scheme) } else { app.deep_link().unregister(scheme) }
-            .map_err(|e| e.to_string());
-        r.map_err(|e| CmdError::new("LINKS", format!("Couldn't change which app opens {scheme}:// links: {e}")))?;
-    }
+    let fail = |e: String| CmdError::new("LINKS", format!("Couldn't change how ssh:// and telnet:// links open: {e}"));
     #[cfg(windows)]
-    let _ = app;
-    Ok(())
+    {
+        let _ = app;
+        let r = if on { links::register(&launch::SCHEMES) } else { links::unregister(&launch::SCHEMES) };
+        r.map_err(|e| fail(e.to_string()))
+    }
+    #[cfg(not(windows))]
+    {
+        let dl = app.deep_link();
+        for scheme in launch::SCHEMES {
+            let r = if on { dl.register(scheme) } else { dl.unregister(scheme) };
+            r.map_err(|e| fail(e.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+/// Windows only: Settings > Default apps, where the user makes Tether the default.
+#[tauri::command]
+fn open_default_apps(app: tauri::AppHandle) -> CmdResult<()> {
+    #[cfg(windows)]
+    {
+        app.opener()
+            .open_url(links::DEFAULT_APPS, None::<&str>)
+            .map_err(|e| CmdError::new("ERROR", format!("Couldn't open Windows Settings: {e}")))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -680,6 +703,7 @@ pub fn run() {
             set_jump_list,
             link_handler_status,
             set_link_handler,
+            open_default_apps,
             vault_status,
             vault_unlock,
             vault_enable,

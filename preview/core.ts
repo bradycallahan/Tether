@@ -259,6 +259,7 @@ const handlers: Record<string, (a: Args) => unknown> = {
   set_jump_list: () => undefined,
   link_handler_status: () => linkHandler,
   set_link_handler: ({ on }) => void (linkHandler = on),
+  open_default_apps: () => undefined,
   vault_status: () => ({ ...vault }),
   vault_unlock: ({ passphrase }) => {
     if (passphrase !== vaultPassphrase) throw { code: "BAD_PASSPHRASE", message: "That isn't the master passphrase." };

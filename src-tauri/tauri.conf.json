@@ -52,7 +52,8 @@
         "installerIcon": "icons/icon.ico",
         "headerImage": "icons/installer/header.bmp",
         "sidebarImage": "icons/installer/sidebar.bmp",
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "installerHooks": "windows/hooks.nsh"
       }
     }
   }
