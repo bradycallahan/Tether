@@ -173,6 +173,7 @@ class App {
       { id: "tab.clone", label: "Clone tab", icon: "clone", detail: "Open another tab to the same device", keys: ["Mod+Shift+D"], enabled: has, run: () => active() && this.cloneTab(active()!) },
       { id: "tab.save", label: "Save as session…", enabled: () => !!active() && !active()!.saved, run: () => active() && this.editFromTab(active()!) },
       { id: "tab.reveal", label: "Show in session manager", enabled: () => !!active()?.saved, run: () => this.revealActive() },
+      { id: "files.toggle", label: "Files (SFTP)", icon: "folder", detail: "Browse, upload and download this device's files", keys: ["Mod+Shift+X"], enabled: () => !!active()?.canShowFiles, checked: () => !!active()?.filesOpen, run: () => active()?.toggleFiles() },
       { id: "tab.break", label: "Send break", keys: ["Mod+Shift+K"], enabled: () => connected() && ["serial", "telnet"].includes(active()!.session.protocol.kind), run: () => active()?.sendBreak() },
       { id: "broadcast.toggle", label: "Broadcast to checked tabs", icon: "broadcast", detail: "Type into every checked tab at once", keys: ["Mod+Shift+B"], checked: () => this.tabs.broadcast, run: () => this.toggleBroadcast() },
       { id: "broadcast.member", label: "Include this tab in broadcast", enabled: has, checked: () => !!active()?.inBroadcast, run: () => active()?.setBroadcastMember(!active()!.inBroadcast) },
@@ -242,7 +243,7 @@ class App {
         label: "Session",
         items: () => [
           cmd("session.options"), cmd("session.loginActions"), cmd("tab.rename"), cmd("tab.clone"), cmd("tab.save"), cmd("tab.reveal"), "-",
-          cmd("tab.break"), "-",
+          cmd("files.toggle"), cmd("tab.break"), "-",
           cmd("broadcast.toggle"), cmd("broadcast.member"), cmd("broadcast.checkAll"), cmd("broadcast.uncheckAll"),
         ],
       },
@@ -275,6 +276,7 @@ class App {
       group("Connecting", ["session.new", "connect.", "tab.reconnect", "tab.disconnect"]),
       group("Tabs", ["tab.close", "tab.clone", "tab.next", "tab.prev"]),
       group("Terminal", ["edit.", "log.", "tab.break", "view.zoom", "view.fullscreen"]),
+      group("Files", ["files."]),
       group("Working with many devices", ["broadcast.", "view.tile", "view.cmdBar"]),
       group("Finding things", ["tools.palette", "view.findSession", "view.sidebar"]),
       group("Settings and help", ["session.options", "tools.settings", "help."]),
@@ -332,6 +334,7 @@ class App {
       "edit.find",
       "-",
       { id: "log.toggle", text: "Log" },
+      { id: "files.toggle", text: "Files" },
       { id: "broadcast.toggle", text: "Broadcast" },
       { id: "view.tile", text: "Tile" },
       "view.cmdBar",
@@ -719,7 +722,13 @@ class App {
   persistWorkspace() {
     if (this.restoring) return;
     const w = store.workspace;
-    w.tabs = this.tabs.tabs.map((t) => ({ session: t.session, saved: t.saved, title: t.customTitle ? t.title : "", inBroadcast: t.inBroadcast }));
+    w.tabs = this.tabs.tabs.map((t) => ({
+      session: t.session,
+      saved: t.saved,
+      title: t.customTitle ? t.title : "",
+      inBroadcast: t.inBroadcast,
+      ...(t.filesOpen ? { filesPath: t.files?.path ?? "" } : {}),
+    }));
     w.active = this.tabs.active ? this.tabs.tabs.indexOf(this.tabs.active) : 0;
     w.tiled = this.tabs.tiled;
     const json = JSON.stringify(w);
@@ -742,6 +751,7 @@ class App {
         const tab = this.tabs.open(fresh ?? wt.session, !!fresh, { activate: false });
         if (wt.title) tab.setTitle(wt.title);
         tab.setBroadcastMember(wt.inBroadcast);
+        if (typeof wt.filesPath === "string") tab.openFiles(wt.filesPath || undefined);
       }
       const active = this.tabs.tabs[Math.min(w.active, this.tabs.tabs.length - 1)];
       if (active) this.tabs.activate(active);
@@ -974,6 +984,7 @@ class App {
       "-",
       cmd("broadcast.member"),
       cmd("log.toggle", { label: tab.logPath ? "Stop logging" : "Start logging" }),
+      cmd("files.toggle"),
       cmd("edit.find"),
       cmd("edit.clear"),
       cmd("tab.break"),

@@ -80,6 +80,8 @@ const db = {
     showStatusBar: true,
     // A first-run library (?empty) shows the master passphrase offer.
     vaultOffered: !empty,
+    filesPaneWidth: 380,
+    filesShowHidden: false,
   } as Args,
   bars: [
     {
@@ -188,7 +190,7 @@ class Device {
   }
 }
 
-const conns = new Map<string, { device: Device; status: Channel<unknown> }>();
+const conns = new Map<string, { device: Device; status: Channel<unknown>; name: string; user: string }>();
 const enc = new TextEncoder();
 const b64 = (s: string) => {
   let bin = "";
@@ -218,13 +220,148 @@ async function connect(a: Args) {
     conns.delete(args.connId);
     status.onmessage({ state: "closed", message: "Connection closed by remote host." });
   });
-  conns.set(args.connId, { device, status });
+  conns.set(args.connId, { device, status, name: s.name, user: p.username ?? "" });
   status.onmessage({ state: "connected", message: `Connected to ${label}` });
   setTimeout(() => device.start(), 60);
   return { logPath: s.terminal.logEnabled ? `/home/admin/.config/Tether/logs/${s.name}.log` : null };
 }
 
-const handlers: Record<string, (a: Args) => unknown> = {
+// ---------------------------------------------------------------------------
+// Fake remote files for the Files pane: one tree shared by every SSH tab.
+// edge-fw1 refuses SFTP, /root is off limits, and transfers take a moment.
+
+interface FNode { name: string; kind: "dir" | "file"; size: number; modified: number; permissions: string; children?: FNode[] }
+const day = 86400;
+const now = Math.floor(Date.now() / 1000);
+const file = (name: string, size: number, age = day, permissions = "rw-r--r--"): FNode => ({ name, kind: "file", size, modified: now - age, permissions });
+const dir = (name: string, children: FNode[] = [], age = 3 * day): FNode => ({ name, kind: "dir", size: 4096, modified: now - age, permissions: "rwxr-xr-x", children });
+const home = (user: string) =>
+  dir(user, [
+    file(".bash_history", 4210, 3600, "rw-------"),
+    dir(".ssh", [file("authorized_keys", 742, 90 * day, "rw-------")], 90 * day),
+    dir("configs", [
+      ...["core-sw1", "core-sw2", "idf1-acc1", "idf2-acc1", "idf3-acc1", "edge-fw1"].map((n, i) => file(`${n}-confg`, 14_000 + i * 2311, day + i * 600)),
+      dir("archive", [file("core-sw1-confg-2026-09-30", 18_220, 21 * day), file("core-sw1-confg-2026-08-31", 18_004, 51 * day)], 21 * day),
+    ], 3600),
+    dir("images", [file("cat9k_iosxe.17.09.04a.SPA.bin", 1_262_034_944, 40 * day), file("cat9k_iosxe.17.12.03.SPA.bin", 1_318_928_384, 6 * day)], 6 * day),
+    dir("captures", [], 12 * day),
+    file("show-tech-core-sw1-2026-10-20.txt", 9_842_113, 2 * 3600),
+    file("maintenance-window-notes.md", 2_148, 5 * 3600),
+  ]);
+const fsRoot = dir("", [
+  dir("bin", [], 200 * day), dir("etc", [file("hosts", 220, 300 * day), file("ssh_config", 1650, 300 * day)], 200 * day),
+  dir("home", [home("netops"), home("admin")], 100 * day),
+  { ...dir("root", [], 100 * day), permissions: "rwx------" },
+  dir("tmp", [], 0), dir("var", [dir("log", [file("syslog", 512_334, 60)])], 100 * day),
+]);
+const findNode = (path: string): FNode | null => {
+  let n: FNode | undefined = fsRoot;
+  for (const part of path.split("/").filter(Boolean)) n = n?.children?.find((c) => c.name === part);
+  return n ?? null;
+};
+const splitPath = (path: string) => {
+  const i = path.replace(/\/+$/, "").lastIndexOf("/");
+  return { parent: findNode(path.slice(0, i) || "/"), name: path.slice(i + 1) };
+};
+const sftpConns = new Map<string, { user: string }>();
+const sftpErr = (what: string, why: string, code = "SFTP") => err(code, `Couldn't ${what}: ${why}.`);
+const sftpConn = (connId: string) => {
+  const c = sftpConns.get(connId);
+  if (!c || !conns.has(connId)) throw err("NOT_CONNECTED", "This tab isn't connected. Reconnect to browse its files.");
+  return c;
+};
+const cancelled = new Set<string>();
+const streams = new Map<string, FNode>();
+async function fakeTransfer(id: string, total: number, name: string, progress: Channel<unknown>) {
+  const steps = 24;
+  for (let i = 1; i <= steps; i++) {
+    await wait(70);
+    if (cancelled.delete(id)) throw err("CANCELLED", "Cancelled.");
+    progress.onmessage({ done: Math.round((total * i) / steps), total, current: name });
+  }
+}
+const sizeOf = (n: FNode): number => (n.kind === "file" ? n.size : (n.children ?? []).reduce((t, c) => t + sizeOf(c), 0));
+const countFiles = (n: FNode): number => (n.kind === "file" ? 1 : (n.children ?? []).reduce((t, c) => t + countFiles(c), 0));
+
+type Handler = (a: Args, opts?: { headers?: Record<string, string> }) => unknown;
+
+const sftpHandlers: Record<string, Handler> = {
+  sftp_open: async ({ connId }) => {
+    await wait(150);
+    const c = conns.get(connId);
+    if (!c) throw err("NOT_CONNECTED", "This tab isn't connected. Reconnect to browse its files.");
+    if (c.name === "edge-fw1") throw err("SFTP_REFUSED", "edge-fw1 doesn't offer SFTP. Some network devices only support SCP, or need their SFTP server turned on.");
+    const user = c.user || "netops";
+    sftpConns.set(connId, { user });
+    return `/home/${user === "admin" ? "admin" : "netops"}`;
+  },
+  sftp_list: async ({ connId, path }) => {
+    sftpConn(connId);
+    await wait(60);
+    const n = findNode(path);
+    if (!n || n.kind !== "dir") throw sftpErr(`open ${path}`, "it doesn't exist", "NOT_FOUND");
+    if (n.name === "root") throw sftpErr(`open ${path}`, "permission denied", "DENIED");
+    return n.children!.map(({ name, kind, size, modified, permissions }) => ({ name, kind, link: false, size, modified, permissions }));
+  },
+  sftp_mkdir: ({ connId, path }) => {
+    sftpConn(connId);
+    const { parent, name } = splitPath(path);
+    if (!parent?.children || parent.children.some((c) => c.name === name)) throw sftpErr(`create ${path}`, "the device refused");
+    parent.children.push(dir(name, [], 0));
+  },
+  sftp_rename: ({ connId, from, to }) => {
+    sftpConn(connId);
+    const a = splitPath(from);
+    const b = splitPath(to);
+    if (b.parent?.children?.some((c) => c.name === b.name)) throw err("EXISTS", `${b.name} already exists.`);
+    const n = a.parent?.children?.find((c) => c.name === a.name);
+    if (!n) throw sftpErr(`rename ${a.name}`, "it doesn't exist", "NOT_FOUND");
+    a.parent!.children = a.parent!.children!.filter((c) => c !== n);
+    n.name = b.name;
+    b.parent?.children?.push(n);
+  },
+  sftp_remove: ({ connId, path }) => {
+    sftpConn(connId);
+    const { parent, name } = splitPath(path);
+    if (parent?.children) parent.children = parent.children.filter((c) => c.name !== name);
+  },
+  sftp_download: async ({ args, progress }) => {
+    sftpConn(args.connId);
+    const n = findNode(args.remote);
+    if (!n) throw sftpErr(`download ${args.remote}`, "it doesn't exist", "NOT_FOUND");
+    await fakeTransfer(args.id, sizeOf(n), n.name, progress);
+    return { files: countFiles(n), skipped: [] };
+  },
+  sftp_upload: async ({ args, progress }) => {
+    sftpConn(args.connId);
+    const target = findNode(args.remote);
+    const name = String(args.local).split(/[\\/]/).pop()!;
+    if (!args.overwrite && target?.children?.some((c) => c.name === name)) throw err("EXISTS", `${name} already exists in ${args.remote}.`, { path: `${args.remote}/${name}` });
+    const isDir = !name.includes(".");
+    const node = isDir ? dir(name, [file("branch1-confg", 12_201, 0), file("branch2-confg", 12_877, 0)], 0) : file(name, 23_500, 0);
+    await fakeTransfer(args.id, sizeOf(node), name, progress);
+    if (target?.children) target.children = [...target.children.filter((c) => c.name !== name), node];
+    return { files: countFiles(node), skipped: [] };
+  },
+  sftp_cancel: ({ id }) => void cancelled.add(id),
+  sftp_upload_begin: ({ connId, id, path, overwrite }) => {
+    sftpConn(connId);
+    const { parent, name } = splitPath(path);
+    if (!overwrite && parent?.children?.some((c) => c.name === name)) throw err("EXISTS", `${name} already exists.`, { path });
+    const node = file(name, 0, 0);
+    if (parent?.children) parent.children = [...parent.children.filter((c) => c.name !== name), node];
+    streams.set(id, node);
+  },
+  sftp_upload_chunk: async (bytes, opts) => {
+    await wait(30);
+    const node = streams.get(opts?.headers?.["x-upload"] ?? "");
+    if (node) node.size += (bytes as unknown as Uint8Array).length;
+  },
+  sftp_upload_end: ({ id }) => void streams.delete(id),
+};
+
+const handlers: Record<string, Handler> = {
+  ...sftpHandlers,
   list_sessions: () => structuredClone(db.sessions),
   save_session: ({ session }) => {
     const i = db.sessions.findIndex((s) => s.id === session.id);
@@ -306,8 +443,8 @@ const handlers: Record<string, (a: Args) => unknown> = {
   set_logging: ({ enabled }) => (enabled ? "/home/admin/.config/Tether/logs/session.log" : null),
 };
 
-export async function invoke<T>(cmd: string, args: Args = {}): Promise<T> {
+export async function invoke<T>(cmd: string, args: Args = {}, opts?: { headers?: Record<string, string> }): Promise<T> {
   const h = handlers[cmd];
   if (!h) throw err("PREVIEW", `The browser preview doesn't fake "${cmd}" yet.`);
-  return (await h(args)) as T;
+  return (await h(args, opts)) as T;
 }

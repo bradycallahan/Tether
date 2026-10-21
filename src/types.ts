@@ -122,6 +122,8 @@ export interface Settings {
   showStatusBar: boolean;
   /** The master passphrase has been offered once (first run). */
   vaultOffered: boolean;
+  filesPaneWidth: number;
+  filesShowHidden: boolean;
 }
 
 export interface WorkspaceTab {
@@ -129,6 +131,30 @@ export interface WorkspaceTab {
   saved: boolean;
   title: string;
   inBroadcast: boolean;
+  /** The Files pane's folder, when it was open. */
+  filesPath?: string | null;
+}
+
+/** One item in a remote folder (sftp.rs `Entry`). A link reports what it points at. */
+export interface RemoteEntry {
+  name: string;
+  kind: "dir" | "file" | "other";
+  link: boolean;
+  size: number;
+  /** Seconds since the epoch. */
+  modified: number | null;
+  permissions: string;
+}
+
+export interface TransferProgress {
+  done: number;
+  total: number;
+  current: string;
+}
+
+export interface TransferSummary {
+  files: number;
+  skipped: string[];
 }
 
 export interface Workspace {

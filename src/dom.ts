@@ -90,4 +90,9 @@ export const ICONS = {
   palette: `<path ${S} d="M8 2a6 6 0 100 12c.9 0 1.3-.7.9-1.5-.4-.9.2-1.7 1.1-1.7H12a2 2 0 002-2.1C13.9 5 11.3 2 8 2z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M5.2 7.2h.01M7.3 4.9h.01M10.3 5.3h.01"/>`,
   buttons: `<path ${S} d="M1.5 5.5h3.6v5H1.5zM6.2 5.5h3.6v5H6.2zM10.9 5.5h3.6v5h-3.6z"/>`,
   highlight: `<path ${S} d="M2.5 13.5h11M5 11l1-3 5-5 2 2-5 5z"/>`,
+  file: `<path ${S} d="M4 2.5h5l3 3v8H4zM9 2.5v3h3"/>`,
+  upload: `<path ${S} d="M8 11V3M5 6l3-3 3 3M3 13.5h10"/>`,
+  download: `<path ${S} d="M8 2.5v8M5 7.5l3 3 3-3M3 13.5h10"/>`,
+  arrowUp: `<path ${S} d="M8 13V3.5M4 7.5l4-4 4 4"/>`,
+  home: `<path ${S} d="M2.5 7.5L8 3l5.5 4.5M4 6.5v7h3v-4h2v4h3v-7"/>`,
 };

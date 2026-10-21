@@ -17,6 +17,7 @@ import { scheme } from "./schemes";
 import { store } from "./state";
 import { describeSend, playSendString } from "./escapes";
 import { requestAttention } from "./platform";
+import { FilePane } from "./sftp";
 import { hostLabel, PROTOCOL_NAMES, type CmdError, type Session, type StatusEvent } from "./types";
 
 export type TabState = "idle" | "connecting" | "connected" | "closed";
@@ -30,7 +31,8 @@ interface ConnectOpts {
 
 export interface TabHost {
   input(tab: Tab, data: string): void;
-  activate(tab: Tab): void;
+  /** `focus` false leaves keyboard focus where it is (a click in the Files pane). */
+  activate(tab: Tab, focus?: boolean): void;
   close(tab: Tab): void;
   changed(tab: Tab): void;
   tabMenu(tab: Tab, x: number, y: number): void;
@@ -76,6 +78,11 @@ export class Tab {
   private titleEl: HTMLSpanElement;
   private bcEl: HTMLSpanElement;
   private termEl: HTMLDivElement;
+  private termWrap: HTMLDivElement;
+  private body: HTMLDivElement;
+  /** The Files pane, made the first time it's opened. */
+  files: FilePane | null = null;
+  filesOpen = false;
   private banner: HTMLDivElement;
   private findBar: HTMLDivElement | null = null;
   private seq = 0;
@@ -114,7 +121,9 @@ export class Tab {
     this.banner = h("div", { class: "banner", hidden: true, role: "status" });
     this.paneLed = h("span", { class: "led" });
     this.paneTitle = h("span", {}, this.title);
-    this.pane = h("div", { class: "pane" }, h("div", { class: "pane-label" }, this.paneLed, this.paneTitle), this.banner, h("div", { class: "term-wrap" }, this.termEl));
+    this.termWrap = h("div", { class: "term-wrap" }, this.termEl);
+    this.body = h("div", { class: "pane-body" }, this.termWrap);
+    this.pane = h("div", { class: "pane" }, h("div", { class: "pane-label" }, this.paneLed, this.paneTitle), this.banner, this.body);
     this.led = h("span", { class: "led" });
     this.titleEl = h("span", { class: "title" }, this.title);
     this.bcEl = h("span", {
@@ -163,7 +172,7 @@ export class Tab {
     );
     this.applyTag();
     this.pane.classList.add("bc-member");
-    this.pane.addEventListener("pointerdown", () => host.activate(this));
+    this.pane.addEventListener("pointerdown", (e) => host.activate(this, !this.files?.el.contains(e.target as Node)));
 
     this.resizeObs = new ResizeObserver(() => this.fitSoon());
   }
@@ -330,6 +339,8 @@ export class Tab {
     o.scrollback = s.scrollback;
     o.theme = scheme(this.session.terminal.colorScheme ?? s.terminalScheme);
     this.pane.style.setProperty("--term-bg", (o.theme.background as string) ?? "");
+    this.pane.style.setProperty("--files-w", `${s.filesPaneWidth || 380}px`);
+    this.files?.applySettings();
     this.applyHighlightSet();
     this.fitSoon();
   }
@@ -348,6 +359,7 @@ export class Tab {
     this.applyTag();
     this.applySettings();
     this.scheduleAntiIdle();
+    if (!this.canShowFiles) this.closeFiles();
   }
 
   private applyTag() {
@@ -392,8 +404,12 @@ export class Tab {
     this.state = state;
     this.statusMessage = message;
     for (const led of [this.led, this.paneLed]) led.className = `led ${state === "idle" ? "" : state}`;
-    if (state === "connected" && was !== "connected") this.connectedAt = Date.now();
+    if (state === "connected" && was !== "connected") {
+      this.connectedAt = Date.now();
+      if (this.filesOpen) this.files?.start();
+    }
     if (state !== "connected") this.connectedAt = null;
+    if (state !== "connected" && state !== was) this.files?.stop();
     this.updateTooltip();
     this.renderBanner();
     this.host.changed(this);
@@ -720,6 +736,81 @@ export class Tab {
     this.host.changed(this);
   }
 
+  // ---------- files ----------
+
+  /** Whether this tab can show files: SFTP needs an SSH connection. */
+  get canShowFiles() {
+    return this.session.protocol.kind === "ssh";
+  }
+
+  toggleFiles() {
+    if (this.filesOpen) this.closeFiles();
+    else this.openFiles();
+  }
+
+  /** Show the Files pane, at `path` when given (a restored workspace). */
+  openFiles(path?: string) {
+    if (!this.canShowFiles) return;
+    if (!this.files) {
+      const tab = this;
+      this.files = new FilePane({
+        connId: this.connId,
+        label: () => tab.title,
+        connected: () => tab.state === "connected",
+        connecting: () => tab.state === "connecting",
+        close: () => tab.closeFiles(),
+        focusTerminal: () => tab.focus(),
+        changed: () => tab.host.changed(tab),
+      });
+      if (path) this.files.path = path;
+    }
+    if (this.filesOpen) {
+      this.files.focus();
+      return;
+    }
+    this.filesOpen = true;
+    const split = h("div", { class: "files-split", role: "separator", "aria-orientation": "vertical", title: "Drag to resize" });
+    this.setupFilesSplit(split);
+    this.body.append(split, this.files.el);
+    if (this.state === "connected") this.files.start(path);
+    else this.files.stop();
+    this.fitSoon();
+    this.host.changed(this);
+    requestAnimationFrame(() => this.files?.focus());
+  }
+
+  closeFiles() {
+    if (!this.filesOpen || !this.files) return;
+    this.filesOpen = false;
+    this.body.querySelector(".files-split")?.remove();
+    this.files.el.remove();
+    this.fitSoon();
+    this.host.changed(this);
+    this.focus();
+  }
+
+  private setupFilesSplit(el: HTMLElement) {
+    el.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      el.setPointerCapture(e.pointerId);
+      el.classList.add("drag");
+      const right = this.body.getBoundingClientRect().right;
+      const width = (x: number) => Math.round(Math.max(240, Math.min(this.body.clientWidth * 0.7, right - x)));
+      const move = (ev: PointerEvent) => {
+        this.pane.style.setProperty("--files-w", `${width(ev.clientX)}px`);
+        this.fitSoon();
+      };
+      const up = (ev: PointerEvent) => {
+        el.classList.remove("drag");
+        el.removeEventListener("pointermove", move);
+        el.removeEventListener("pointerup", up);
+        store.patchSettings({ filesPaneWidth: width(ev.clientX) });
+      };
+      el.addEventListener("pointermove", move);
+      el.addEventListener("pointerup", up);
+    });
+  }
+
   // ---------- find ----------
 
   openFind() {
@@ -777,7 +868,7 @@ export class Tab {
       h("button", { type: "button", class: "btn ghost icon-only", title: "Next (Enter)", onclick: () => find() }, icon("down")),
       h("button", { type: "button", class: "btn ghost icon-only", title: "Close (Esc)", onclick: close }, icon("close")),
     );
-    this.pane.append(this.findBar);
+    this.termWrap.append(this.findBar);
     const sel = this.term.getSelection();
     if (sel && !sel.includes("\n")) {
       input.value = sel;
@@ -793,6 +884,7 @@ export class Tab {
     clearTimeout(this.reconnectTimer);
     clearTimeout(this.idleTimer);
     clearTimeout(this.bannerTimer);
+    this.files?.dispose();
     api.disconnect(this.connId);
     this.resizeObs.disconnect();
     this.highlighter.dispose();
@@ -873,24 +965,28 @@ export class TabManager implements TabHost {
     return tab;
   }
 
-  activate(tab: Tab) {
+  activate(tab: Tab, focus = true) {
     if (this.active === tab) {
-      if (!document.querySelector("dialog[open]")) tab.focus();
+      if (focus && !document.querySelector("dialog[open]")) tab.focus();
       return;
     }
     this.active?.setActive(false);
     this.active = tab;
     tab.setActive(true);
     tab.tabEl.scrollIntoView({ block: "nearest", inline: "nearest" });
-    setTimeout(() => {
-      if (!document.querySelector("dialog[open]")) tab.focus();
-    });
+    if (focus) {
+      setTimeout(() => {
+        if (!document.querySelector("dialog[open]")) tab.focus();
+      });
+    }
     this.render();
   }
 
   async close(tab: Tab, ask = true) {
     if (ask && tab.state === "connected") {
-      const ok = await confirmDialog({ title: `Disconnect ${tab.title}?`, message: "The connection will be closed.", confirm: "Disconnect and close" });
+      const busy = tab.files?.busy() ?? 0;
+      const message = busy ? `The connection will be closed, stopping ${busy === 1 ? "a file transfer" : `${busy} file transfers`}.` : "The connection will be closed.";
+      const ok = await confirmDialog({ title: `Disconnect ${tab.title}?`, message, confirm: "Disconnect and close" });
       if (!ok) return;
     }
     const i = this.tabs.indexOf(tab);

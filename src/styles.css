@@ -326,6 +326,83 @@ button.link:hover { text-decoration: underline; }
 .findbar input { width: 220px; }
 .findbar .count { font-size: 11.5px; color: var(--text-dim); min-width: 56px; text-align: center; }
 
+/* ---------- files pane (SFTP) ---------- */
+
+.pane-body { flex: 1; display: flex; min-height: 0; min-width: 0; }
+.pane-body > .term-wrap { flex: 1; min-width: 0; }
+.files-split { flex: none; width: 4px; cursor: col-resize; background: var(--rule); }
+.files-split:hover, .files-split.drag { background: var(--cable); }
+.files {
+  position: relative; flex: none; display: flex; flex-direction: column; min-width: 0;
+  /* The terminal keeps a usable width; the Files pane gives way first. */
+  width: min(var(--files-w, 380px), max(220px, 100% - 360px)); background: var(--panel); container-type: inline-size;
+}
+.panes.tiled .files { width: min(var(--files-w, 380px), 55%); }
+.files.drop::after { content: ""; position: absolute; inset: 4px; border: 2px dashed var(--cable); border-radius: var(--radius-m); pointer-events: none; z-index: 5; }
+.files-head { display: flex; align-items: center; gap: 6px; padding: 6px 6px 4px 12px; color: var(--text-dim); }
+.files-head h2 { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); }
+.files-head .grow, .files-bar .grow { flex: 1; }
+.files-bar { display: flex; align-items: center; gap: 2px; padding: 0 6px 4px; }
+.files-bar .path { flex: 1; font-family: var(--font-mono); font-size: 12px; }
+.files-bar.actions { padding-bottom: 6px; border-bottom: 1px solid var(--rule); }
+.files-bar.actions .btn:not(.icon-only) { padding: 0 8px; }
+
+.files-table { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.files-cols, .file-row { display: grid; grid-template-columns: minmax(0, 1fr) 70px 112px; column-gap: 8px; }
+.files-cols { padding: 0 8px 0 6px; border-bottom: 1px solid var(--rule); }
+.files-cols .col {
+  display: flex; align-items: center; gap: 2px; height: 26px; padding: 0 0 0 2px; min-width: 0;
+  border: 0; background: none; color: var(--text-dim); font-size: 12px; cursor: pointer; text-align: left;
+}
+.files-cols .col:hover, .files-cols .col.sorted { color: var(--text); }
+.files-cols .col.size { justify-content: flex-end; }
+.files-cols .col .icon { width: 12px; height: 12px; }
+.files-list { flex: 1; overflow: auto; outline: none; padding: 2px 0 8px; }
+.files-list:empty { flex: 0; padding: 0; }
+.files-list[aria-busy="true"] { opacity: 0.55; }
+.file-row {
+  align-items: center; height: 24px; padding: 0 8px 0 4px;
+  border-left: 2px solid transparent; white-space: nowrap; cursor: default;
+}
+.file-row:hover { background: var(--panel-2); }
+.file-row.selected { background: var(--select); }
+.files-list:focus .file-row.cursor { border-left-color: var(--cable); }
+.file-row.drop { outline: 1px dashed var(--cable); outline-offset: -2px; background: var(--select); }
+.file-row .name { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.file-row .name .icon { color: var(--text-dim); }
+.file-row .label { overflow: hidden; text-overflow: ellipsis; }
+.file-row.link .label { font-style: italic; }
+.file-row .size, .file-row .modified { color: var(--text-dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.file-row .size { text-align: right; }
+.file-row .rename { height: 22px; flex: 1; padding: 0 5px; }
+/* Narrow panes keep name and size. */
+@container (max-width: 300px) {
+  .files-cols, .file-row { grid-template-columns: minmax(0, 1fr) 64px; }
+  .files-cols .modified, .file-row .modified { display: none; }
+  .files-bar.actions .btn .text { display: none; }
+  .files-bar.actions .btn:not(.icon-only) { padding: 0; width: 28px; justify-content: center; }
+}
+.files-msg { padding: 16px 14px; color: var(--text-dim); line-height: 1.55; overflow-wrap: anywhere; }
+.files-msg p { margin: 0 0 10px; }
+.files-msg.fault p { color: var(--text); border-left: 3px solid var(--fault); padding-left: 10px; }
+.files-msg .actions { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.transfers { flex: none; max-height: 40%; overflow: auto; border-top: 1px solid var(--rule); padding: 4px 0; }
+.transfer { display: flex; align-items: center; gap: 8px; padding: 3px 4px 3px 12px; }
+.transfer > .icon { color: var(--text-dim); }
+.transfer .info { flex: 1; min-width: 0; }
+.transfer .line { display: flex; gap: 8px; font-size: 12px; }
+.transfer .name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.transfer .detail { flex: none; max-width: 65%; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.transfer .bar { height: 3px; margin-top: 4px; border-radius: 2px; background: var(--panel-3); overflow: hidden; }
+.transfer .fill { width: 0; height: 100%; background: var(--cable); }
+.transfer.ok .fill { background: var(--link); }
+.transfer.failed .fill { background: var(--fault); }
+.transfer.cancelled .fill { background: var(--text-dim); }
+.transfer.failed .line { flex-wrap: wrap; }
+.transfer.failed .detail { color: var(--fault); white-space: normal; max-width: none; flex-basis: 100%; }
+.transfer .btn { height: 24px; width: 24px; }
+
 /* ---------- welcome ---------- */
 
 .welcome { position: absolute; inset: 0; overflow: auto; background: var(--panel); user-select: none; }
@@ -608,8 +685,9 @@ table.ref td:first-child { width: 42%; }
 @media (forced-colors: active) {
   /* The LEDs carry state, so they keep their colors. */
   .led { forced-color-adjust: none; border: 1px solid CanvasText; }
-  .tree-row.selected, .menu button:focus, .palette li.sel { background: Highlight; color: HighlightText; forced-color-adjust: none; }
-  .tree:focus .tree-row.cursor { outline: 1px solid Highlight; }
+  .tree-row.selected, .file-row.selected, .menu button:focus, .palette li.sel { background: Highlight; color: HighlightText; forced-color-adjust: none; }
+  .tree:focus .tree-row.cursor, .files-list:focus .file-row.cursor { outline: 1px solid Highlight; }
+  .transfer .fill { background: Highlight; forced-color-adjust: none; }
   .tab.active { border-top: 2px solid Highlight; }
   .btn, .tool, input, select, textarea, .menu, dialog { border: 1px solid ButtonText; }
   .btn.primary { background: ButtonText; color: ButtonFace; forced-color-adjust: none; }

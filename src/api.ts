@@ -1,5 +1,14 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
-import type { ButtonBar, HighlightSet, ImportReport, LaunchTarget, PortInfo, SecretKind, Session, Settings, ShellInfo, StatusEvent, Workspace } from "./types";
+import type { ButtonBar, HighlightSet, ImportReport, LaunchTarget, PortInfo, RemoteEntry, SecretKind, Session, Settings, ShellInfo, StatusEvent, TransferProgress, TransferSummary, Workspace } from "./types";
+
+/** A transfer the UI names with `id`, so it can be cancelled while running. */
+export interface TransferArgs {
+  connId: string;
+  id: string;
+  remote: string;
+  local: string;
+  overwrite: boolean;
+}
 
 export const api = {
   listSessions: () => invoke<Session[]>("list_sessions"),
@@ -69,6 +78,30 @@ export const api = {
   sendBreak: (connId: string) => invoke<boolean>("send_break", { connId }),
   disconnect: (connId: string) => invoke<void>("disconnect", { connId }),
   setLogging: (connId: string, enabled: boolean) => invoke<string | null>("set_logging", { connId, enabled }),
+
+  // Files pane (SFTP over the tab's SSH connection)
+  sftpOpen: (connId: string) => invoke<string>("sftp_open", { connId }),
+  sftpList: (connId: string, path: string) => invoke<RemoteEntry[]>("sftp_list", { connId, path }),
+  sftpMkdir: (connId: string, path: string) => invoke<void>("sftp_mkdir", { connId, path }),
+  sftpRename: (connId: string, from: string, to: string) => invoke<void>("sftp_rename", { connId, from, to }),
+  sftpRemove: (connId: string, path: string) => invoke<void>("sftp_remove", { connId, path }),
+  /** `local` is the destination path itself, not its folder. */
+  sftpDownload: (args: TransferArgs, onProgress: (p: TransferProgress) => void) => {
+    const progress = new Channel<TransferProgress>();
+    progress.onmessage = onProgress;
+    return invoke<TransferSummary>("sftp_download", { args, progress });
+  },
+  /** `remote` is the folder to upload into. */
+  sftpUpload: (args: TransferArgs, onProgress: (p: TransferProgress) => void) => {
+    const progress = new Channel<TransferProgress>();
+    progress.onmessage = onProgress;
+    return invoke<TransferSummary>("sftp_upload", { args, progress });
+  },
+  sftpCancel: (id: string) => invoke<void>("sftp_cancel", { id }),
+  sftpUploadBegin: (connId: string, id: string, path: string, overwrite: boolean) => invoke<void>("sftp_upload_begin", { connId, id, path, overwrite }),
+  /** Raw bytes, not JSON: dropped files can be large. */
+  sftpUploadChunk: (id: string, bytes: Uint8Array) => invoke<void>("sftp_upload_chunk", bytes, { headers: { "x-upload": id } }),
+  sftpUploadEnd: (id: string, ok: boolean) => invoke<void>("sftp_upload_end", { id, ok }),
 };
 
 function fromBase64(b64: string): Uint8Array {

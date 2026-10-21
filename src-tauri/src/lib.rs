@@ -11,6 +11,7 @@ pub mod logger;
 pub mod model;
 pub mod secrets;
 pub mod serial;
+pub mod sftp;
 pub mod ssh;
 pub mod store;
 pub mod telnet;
@@ -33,6 +34,7 @@ use tokio::sync::mpsc;
 struct AppState {
     store: Store,
     manager: Manager,
+    sftp: sftp::Manager,
     placement: window::Placement,
     /// What the command line asked to open, until the UI is ready for it.
     launch: parking_lot::Mutex<Vec<launch::Target>>,
@@ -521,7 +523,7 @@ async fn connect(
                     out.status("warning", format!("Couldn't save to the system keychain ({e:#}). Tether will remember it until this tab closes."));
                 }
             }
-            r.map_err(|mut e| {
+            r.map(Some).map_err(|mut e| {
                 if e.code == "AUTH_FAILED" && used_saved_password {
                     e.detail = Some(serde_json::json!({ "usedSaved": true }));
                 }
@@ -529,10 +531,10 @@ async fn connect(
             })
         }
         Protocol::Telnet { host, port } => {
-            telnet::start(host.clone(), *port, true, term, args.cols, args.rows, out.clone(), rx).await
+            telnet::start(host.clone(), *port, true, term, args.cols, args.rows, out.clone(), rx).await.map(|_| None)
         }
         Protocol::Raw { host, port } => {
-            telnet::start(host.clone(), *port, false, term, args.cols, args.rows, out.clone(), rx).await
+            telnet::start(host.clone(), *port, false, term, args.cols, args.rows, out.clone(), rx).await.map(|_| None)
         }
         Protocol::Serial { port, baud, data_bits, parity, stop_bits, flow } => {
             let p = serial::Params {
@@ -543,15 +545,24 @@ async fn connect(
                 stop_bits: *stop_bits,
                 flow: *flow,
             };
-            serial::start(p, out.clone(), rx).await
+            serial::start(p, out.clone(), rx).await.map(|_| None)
         }
-        Protocol::Local { shell } => local::start(shell.clone(), args.cols, args.rows, out.clone(), rx).await,
+        Protocol::Local { shell } => {
+            local::start(shell.clone(), args.cols, args.rows, out.clone(), rx).await.map(|_| None)
+        }
     };
 
-    if let Err(e) = result {
-        out.set_tap(None);
-        out.status("error", e.message.clone());
-        return Err(e);
+    let link = match result {
+        Ok(link) => link,
+        Err(e) => {
+            out.set_tap(None);
+            out.status("error", e.message.clone());
+            return Err(e);
+        }
+    };
+    match (link, &s.protocol) {
+        (Some(link), Protocol::Ssh { host, .. }) => state.sftp.attach(&args.conn_id, link, host),
+        _ => state.sftp.detach(&args.conn_id),
     }
     if let Some(tap_rx) = tap_rx {
         let username = match &s.protocol {
@@ -595,6 +606,7 @@ fn send_break(state: State<AppState>, conn_id: String) -> bool {
 
 #[tauri::command]
 fn disconnect(state: State<AppState>, conn_id: String) {
+    state.sftp.detach(&conn_id);
     state.manager.remove(&conn_id);
 }
 
@@ -618,6 +630,112 @@ fn set_logging(state: State<AppState>, conn_id: String, enabled: bool) -> CmdRes
         Some(r) => Ok(r?),
         None => Err(CmdError::new("NOT_CONNECTED", "That tab isn't connected.")),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Files pane (SFTP over a tab's SSH connection)
+
+#[tauri::command]
+async fn sftp_open(state: State<'_, AppState>, conn_id: String) -> CmdResult<String> {
+    state.sftp.open(&conn_id).await
+}
+
+#[tauri::command]
+async fn sftp_list(state: State<'_, AppState>, conn_id: String, path: String) -> CmdResult<Vec<sftp::Entry>> {
+    state.sftp.list(&conn_id, &path).await
+}
+
+#[tauri::command]
+async fn sftp_mkdir(state: State<'_, AppState>, conn_id: String, path: String) -> CmdResult<()> {
+    state.sftp.mkdir(&conn_id, &path).await
+}
+
+#[tauri::command]
+async fn sftp_rename(state: State<'_, AppState>, conn_id: String, from: String, to: String) -> CmdResult<()> {
+    state.sftp.rename(&conn_id, &from, &to).await
+}
+
+#[tauri::command]
+async fn sftp_remove(state: State<'_, AppState>, conn_id: String, path: String) -> CmdResult<()> {
+    state.sftp.remove(&conn_id, &path).await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TransferArgs {
+    conn_id: String,
+    /// Picked by the UI, so it can cancel before this call returns.
+    id: String,
+    remote: String,
+    local: String,
+    overwrite: bool,
+}
+
+/// Download `remote` (a file or folder) to the local path `local`.
+#[tauri::command]
+async fn sftp_download(
+    state: State<'_, AppState>,
+    args: TransferArgs,
+    progress: Channel<sftp::Progress>,
+) -> CmdResult<sftp::Summary> {
+    let report = move |p| {
+        let _ = progress.send(p);
+    };
+    state
+        .sftp
+        .download(&args.conn_id, &args.id, &args.remote, &PathBuf::from(&args.local), args.overwrite, report)
+        .await
+}
+
+/// Upload the local file or folder `local` into the remote folder `remote`.
+#[tauri::command]
+async fn sftp_upload(
+    state: State<'_, AppState>,
+    args: TransferArgs,
+    progress: Channel<sftp::Progress>,
+) -> CmdResult<sftp::Summary> {
+    let report = move |p| {
+        let _ = progress.send(p);
+    };
+    state.sftp.upload(&args.conn_id, &args.id, &PathBuf::from(&args.local), &args.remote, args.overwrite, report).await
+}
+
+#[tauri::command]
+fn sftp_cancel(state: State<AppState>, id: String) {
+    state.sftp.cancel(&id);
+}
+
+/// Start an upload whose bytes follow in `sftp_upload_chunk` calls (a file
+/// dropped on the pane: the webview has its contents, not its path).
+#[tauri::command]
+async fn sftp_upload_begin(
+    state: State<'_, AppState>,
+    conn_id: String,
+    id: String,
+    path: String,
+    overwrite: bool,
+) -> CmdResult<()> {
+    state.sftp.stream_begin(&conn_id, &id, &path, overwrite).await
+}
+
+/// One chunk of a dropped file, sent as a raw request body with the upload id
+/// in a header, so large files don't go through JSON.
+#[tauri::command]
+async fn sftp_upload_chunk(state: State<'_, AppState>, request: tauri::ipc::Request<'_>) -> CmdResult<()> {
+    let id = request
+        .headers()
+        .get("x-upload")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| CmdError::new("ARG", "Missing upload id."))?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err(CmdError::new("ARG", "Expected raw bytes."));
+    };
+    state.sftp.stream_chunk(id, bytes).await
+}
+
+#[tauri::command]
+async fn sftp_upload_end(state: State<'_, AppState>, id: String, ok: bool) -> CmdResult<()> {
+    state.sftp.stream_end(&id, ok).await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -646,6 +764,7 @@ pub fn run() {
         .manage(AppState {
             store,
             manager: Manager::default(),
+            sftp: sftp::Manager::default(),
             placement: window::Placement::default(),
             launch: parking_lot::Mutex::new(launch::targets(std::env::args().skip(1))),
         })
@@ -718,6 +837,17 @@ pub fn run() {
             send_break,
             disconnect,
             set_logging,
+            sftp_open,
+            sftp_list,
+            sftp_mkdir,
+            sftp_rename,
+            sftp_remove,
+            sftp_download,
+            sftp_upload,
+            sftp_cancel,
+            sftp_upload_begin,
+            sftp_upload_chunk,
+            sftp_upload_end,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tether");

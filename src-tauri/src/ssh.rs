@@ -229,9 +229,48 @@ async fn authenticate(h: &mut Handle<Client>, t: &Target) -> CmdResult<()> {
     Err(CmdError::new("AUTH_FAILED", format!("{} rejected the password for {user}.", t.host)))
 }
 
+/// A live, authenticated SSH connection that more channels can be opened on
+/// (the Files pane's SFTP subsystem), without logging in again.
+#[derive(Clone)]
+pub struct Link(Arc<Handle<Client>>);
+
+impl Link {
+    /// Open the `sftp` subsystem and wait for the server's answer, so a device
+    /// without SFTP is reported as such instead of as a protocol error later.
+    pub async fn open_subsystem(&self, name: &str) -> Result<russh::ChannelStream<client::Msg>, SubsystemError> {
+        let mut ch = self.0.channel_open_session().await.map_err(SubsystemError::Channel)?;
+        ch.request_subsystem(true, name).await.map_err(SubsystemError::Channel)?;
+        let answer = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                match ch.wait().await {
+                    Some(ChannelMsg::Success) => return Ok(()),
+                    Some(ChannelMsg::Failure) | Some(ChannelMsg::Close) | Some(ChannelMsg::Eof) | None => {
+                        return Err(SubsystemError::Refused)
+                    }
+                    Some(_) => {}
+                }
+            }
+        })
+        .await
+        .unwrap_or(Err(SubsystemError::Timeout));
+        answer.map(|_| ch.into_stream())
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.0.is_closed()
+    }
+}
+
+#[derive(Debug)]
+pub enum SubsystemError {
+    Channel(russh::Error),
+    Refused,
+    Timeout,
+}
+
 /// Connect, authenticate and start the shell. Returns once the shell is up;
 /// I/O then continues on background tasks until `Ctl::Close` or EOF.
-pub async fn start(p: Params, out: Output, mut rx: mpsc::UnboundedReceiver<Ctl>) -> CmdResult<()> {
+pub async fn start(p: Params, out: Output, mut rx: mpsc::UnboundedReceiver<Ctl>) -> CmdResult<Link> {
     let (jump_handle, handle) = match &p.jump {
         Some(j) => {
             out.status("connecting", format!("Connecting to jump host {}…", j.host));
@@ -255,6 +294,8 @@ pub async fn start(p: Params, out: Output, mut rx: mpsc::UnboundedReceiver<Ctl>)
     channel.request_pty(false, &p.term, p.cols as u32, p.rows as u32, 0, 0, &[]).await.map_err(chan_err)?;
     channel.request_shell(true).await.map_err(chan_err)?;
     let (mut read, write) = channel.split();
+    let handle = Arc::new(handle);
+    let link = Link(handle.clone());
 
     let reader_out = out.clone();
     tokio::spawn(async move {
@@ -293,7 +334,7 @@ pub async fn start(p: Params, out: Output, mut rx: mpsc::UnboundedReceiver<Ctl>)
     });
 
     out.status("connected", format!("Connected to {}", p.target.host));
-    Ok(())
+    Ok(link)
 }
 
 /// Record a host key the user chose to trust.
