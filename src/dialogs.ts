@@ -55,6 +55,8 @@ export function modal<T>(build: (done: (v: T | undefined) => void) => DialogPart
     dlg.append(form);
     dlg.addEventListener("cancel", (e) => {
       e.preventDefault();
+      // Esc that closed a color picker's popup shouldn't also discard the dialog.
+      if (document.activeElement instanceof HTMLInputElement && document.activeElement.type === "color") return;
       done(undefined);
     });
     const host = windowHost;

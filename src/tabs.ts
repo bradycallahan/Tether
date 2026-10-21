@@ -56,6 +56,7 @@ export class Tab {
   readonly connId = crypto.randomUUID();
   state: TabState = "idle";
   statusMessage = "Not connected";
+  private everConnected = false;
   logPath: string | null = null;
   inBroadcast = true;
   title: string;
@@ -542,6 +543,9 @@ export class Tab {
       this.logPath = info.logPath;
       this.reconnectAttempt = 0;
       if (this.state !== "connected") this.setState("connected", `Connected to ${hostLabel(this.session.protocol)}`);
+      // Pairs with the "Disconnected" line so the scrollback shows the gap.
+      if (this.everConnected) this.info(`— Connected. ${new Date().toLocaleTimeString()}`, "32");
+      this.everConnected = true;
       api.resize(this.connId, this.term.cols, this.term.rows);
       this.scheduleAntiIdle();
     } catch (raw) {

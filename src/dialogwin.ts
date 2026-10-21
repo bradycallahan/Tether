@@ -140,8 +140,10 @@ function applyTheme() {
 async function present(dlg: HTMLDialogElement, title: string, anchor: Anchor) {
   const win = getCurrentWindow();
   const box = dlg.getBoundingClientRect();
-  const width = Math.ceil(box.width);
-  const height = Math.ceil(box.height);
+  // Never bigger than the main window: options dialogs are a fixed size and
+  // otherwise overhang a small main window.
+  const width = Math.ceil(Math.min(box.width, Math.max(420, anchor.width - 40)));
+  const height = Math.ceil(Math.min(box.height, Math.max(260, anchor.height - 60)));
   dlg.classList.add("in-window");
   document.title = title;
   await Promise.all([
