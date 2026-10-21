@@ -4,6 +4,9 @@ All notable changes to Tether are listed here. The format follows [Keep a Change
 
 ## Unreleased
 
+### Added
+- Files pane for SSH tabs (Session > Files (SFTP), Ctrl+Shift+X, or Files on the toolbar): browse the device's folders beside the terminal, upload with the Upload button or by dropping files and folders from your desktop onto the pane (or onto a folder in it), download with Enter or a double-click, and create, rename (F2) and delete (Del) files and folders. It uses the tab's own connection, so there's no second login, and transfers show progress and speed and can be cancelled. Tether asks before replacing a file, never leaves half-downloaded files behind, and reopens the pane at the same folder next time
+
 ## 0.3.0 — 2026-10-21
 
 ### Added

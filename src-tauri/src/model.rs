@@ -269,6 +269,10 @@ pub struct Settings {
     pub show_status_bar: bool,
     /// The master passphrase has been offered (once, at first run).
     pub vault_offered: bool,
+    /// Width of the Files pane beside a terminal, in pixels.
+    pub files_pane_width: u32,
+    /// Show dot-files in the Files pane.
+    pub files_show_hidden: bool,
 }
 
 impl Default for Settings {
@@ -302,6 +306,8 @@ impl Default for Settings {
             show_sidebar: true,
             show_status_bar: true,
             vault_offered: false,
+            files_pane_width: 380,
+            files_show_hidden: false,
         }
     }
 }
@@ -331,6 +337,9 @@ pub struct WorkspaceTab {
     pub title: String,
     #[serde(default = "yes")]
     pub in_broadcast: bool,
+    /// The remote folder the tab's Files pane showed, when it was open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_path: Option<String>,
 }
 
 /// Where the main window was when Tether last closed (`window.toml`). Only
@@ -418,7 +427,13 @@ mod tests {
         "#;
         let session: Session = toml::from_str(text).unwrap();
         let w = Workspace {
-            tabs: vec![WorkspaceTab { session, saved: true, title: "console".into(), in_broadcast: false }],
+            tabs: vec![WorkspaceTab {
+                session,
+                saved: true,
+                title: "console".into(),
+                in_broadcast: false,
+                files_path: Some("/home/admin".into()),
+            }],
             active: 0,
             tiled: true,
             recent: vec!["x".into()],
@@ -430,5 +445,6 @@ mod tests {
         let json = serde_json::to_value(&w).unwrap();
         assert!(json["tabs"].is_array() && json["recent"].is_array());
         assert!(json["tabs"][0]["inBroadcast"].is_boolean());
+        assert_eq!(json["tabs"][0]["filesPath"], "/home/admin");
     }
 }

@@ -38,7 +38,8 @@ How Tether 0.1 compares with what SecureCRT offers, and what's planned next. "Do
 | Import from SecureCRT | n/a | Done (hosts, ports, users, serial, folders) |
 | Portable mode | Yes | Done |
 | Scripting (Python / VBScript) | Yes | Planned (see below) |
-| SFTP tab / file transfer | Yes | Planned |
+| SFTP tab / file transfer | Yes | Done: a Files pane beside each SSH tab, over the same connection, with drag-and-drop upload |
+| SCP for devices without SFTP | Yes | Planned |
 | Xmodem / Ymodem / Zmodem | Yes | Planned |
 | Built-in TFTP server | Yes | Planned |
 | Port forwarding (local/remote/dynamic) | Yes | Planned |
@@ -51,12 +52,12 @@ How Tether 0.1 compares with what SecureCRT offers, and what's planned next. "Do
 
 ## Next up
 
-1. **SFTP pane** beside an SSH tab, plus drag-and-drop upload. russh-sftp makes this mostly UI work.
-2. **Port forwarding** per session (local, remote, SOCKS).
-3. **SSH agent** support: Pageant / Windows OpenSSH agent / ssh-agent, and forwarding.
-4. **TFTP server** in the status bar for pushing IOS images and pulling configs.
-5. **Xmodem/Ymodem** over serial for ROMMON image recovery.
-6. **Split panes** that can be dragged and resized.
+1. **Port forwarding** per session (local, remote, SOCKS).
+2. **SSH agent** support: Pageant / Windows OpenSSH agent / ssh-agent, and forwarding.
+3. **TFTP server** in the status bar for pushing IOS images and pulling configs.
+4. **Xmodem/Ymodem** over serial for ROMMON image recovery.
+5. **Split panes** that can be dragged and resized.
+6. **Files pane, next steps:** SCP for IOS devices that don't run an SFTP server, a local-files side for SecureFX-style two-pane transfers, dragging files out to the desktop, and resuming interrupted transfers.
 
 ## Scripting
 
