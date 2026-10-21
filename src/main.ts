@@ -31,12 +31,14 @@ class App {
   barButtons!: HTMLElement;
   buttonBarEl!: HTMLElement;
   cmdBar!: HTMLElement;
-  cmdInput!: HTMLInputElement;
+  cmdInput!: HTMLTextAreaElement;
   cmdTarget!: HTMLButtonElement;
   statusEl!: HTMLElement;
   uptimeEl: HTMLElement | null = null;
   currentBar: string | null = null;
   history: string[] = [];
+  /** Always on top lasts until Tether closes, like SecureCRT's. */
+  private onTop = false;
   /** Shells found on this machine, default first; filled in shortly after startup. */
   shells: ShellInfo[] = [];
   historyPos = -1;
@@ -133,6 +135,7 @@ class App {
       { id: "view.cmdBar", label: "Command window", icon: "command", detail: "Compose a command before sending it", keys: ["Mod+Shift+O"], checked: shown("showCommandBar"), run: () => this.toggleCmdBar() },
       { id: "view.statusBar", label: "Status bar", checked: shown("showStatusBar"), run: toggle("showStatusBar") },
       { id: "view.tile", label: "Tile tabs", icon: "tile", detail: "Show every tab at once", keys: ["Mod+Shift+G"], enabled: () => this.tabs.tabs.length > 1 || this.tabs.tiled, checked: () => this.tabs.tiled, run: () => this.toggleTile() },
+      { id: "view.onTop", label: "Always on top", detail: "Keep Tether above other windows", checked: () => this.onTop, run: () => this.toggleOnTop() },
       { id: "view.fullscreen", label: "Full screen", icon: "fullscreen", keys: ["F11"], macKeys: ["Ctrl+Meta+F"], run: () => this.toggleFullscreen() },
       { id: "view.zoomIn", label: "Bigger text", keys: ["Mod+=", "Mod++"], run: () => this.zoom(1) },
       { id: "view.zoomOut", label: "Smaller text", keys: ["Mod+-"], run: () => this.zoom(-1) },
@@ -207,7 +210,7 @@ class App {
         label: "View",
         items: () => [
           cmd("view.sidebar"), cmd("view.toolbar"), cmd("view.buttonBar"), cmd("view.cmdBar"), cmd("view.statusBar"), "-",
-          cmd("view.tile"), cmd("view.fullscreen"), "-",
+          cmd("view.tile"), cmd("view.onTop"), cmd("view.fullscreen"), "-",
           cmd("view.zoomIn"), cmd("view.zoomOut"), cmd("view.zoomReset"), "-",
           { label: "Theme", submenu: [cmd("view.theme.system"), cmd("view.theme.dark"), cmd("view.theme.light")] },
         ],
@@ -337,7 +340,8 @@ class App {
     this.setupSessionDrop(strip);
 
     // Command window
-    this.cmdInput = h("input", { type: "text", placeholder: "Type a command and press Enter. Escapes like \\r and ^C work. Up and Down recall history.", spellcheck: "false", "aria-label": "Command window" });
+    this.cmdInput = h("textarea", { rows: 1, placeholder: "Type a command and press Enter. Ctrl+Enter adds a line. Escapes like \\r and ^C work. Up and Down recall history.", spellcheck: "false", "aria-label": "Command window" });
+    this.cmdInput.addEventListener("input", () => this.fitCmdInput());
     this.cmdTarget = h("button", { type: "button", class: "target", title: "Click to switch between this tab and broadcasting to checked tabs", onclick: () => this.toggleBroadcast(false) });
     this.cmdInput.addEventListener("keydown", (e) => this.cmdKey(e));
     this.cmdBar = h("div", { class: "cmdbar" },
@@ -557,19 +561,37 @@ class App {
     if (v.trim() && this.history[0] !== v) this.history.unshift(v);
     this.history.length = Math.min(this.history.length, 200);
     this.historyPos = -1;
-    const hasEnter = /\\[rn]$/.test(v);
-    this.tabs.sendString(hasEnter ? v : v + "\\r").then(() => this.cmdInput.focus());
-    this.cmdInput.value = "";
+    // Each line of a multi-line command is sent with its own Enter.
+    const text = v.replace(/\r?\n/g, "\\r");
+    const hasEnter = /\\[rn]$/.test(text);
+    this.tabs.sendString(hasEnter ? text : text + "\\r").then(() => this.cmdInput.focus());
+    this.setCmdInput("");
+  }
+
+  private setCmdInput(v: string) {
+    this.cmdInput.value = v;
+    this.fitCmdInput();
+  }
+
+  /** Grow with the text, up to six lines. */
+  private fitCmdInput() {
+    const lines = Math.min(6, this.cmdInput.value.split("\n").length);
+    this.cmdInput.rows = lines;
   }
 
   cmdKey(e: KeyboardEvent) {
-    if (e.key === "Enter") {
+    const el = this.cmdInput;
+    const multiline = el.value.includes("\n");
+    if (e.key === "Enter" && (e.ctrlKey || e.shiftKey)) {
+      el.setRangeText("\n", el.selectionStart, el.selectionEnd, "end");
+      this.fitCmdInput();
+    } else if (e.key === "Enter" && !e.altKey && !e.metaKey) {
       this.sendCmd();
-    } else if (e.key === "ArrowUp") {
-      if (this.historyPos < this.history.length - 1) this.cmdInput.value = this.history[++this.historyPos];
-    } else if (e.key === "ArrowDown") {
+    } else if (e.key === "ArrowUp" && (!multiline || el.selectionStart === 0)) {
+      if (this.historyPos < this.history.length - 1) this.setCmdInput(this.history[++this.historyPos]);
+    } else if (e.key === "ArrowDown" && (!multiline || el.selectionStart === el.value.length)) {
       this.historyPos = Math.max(-1, this.historyPos - 1);
-      this.cmdInput.value = this.historyPos >= 0 ? this.history[this.historyPos] : "";
+      this.setCmdInput(this.historyPos >= 0 ? this.history[this.historyPos] : "");
     } else if (e.key === "Escape") {
       this.focusTerminal();
     } else return;
@@ -983,6 +1005,12 @@ class App {
   toggleTile() {
     this.tabs.setTiled(!this.tabs.tiled);
     this.focusTerminal();
+  }
+
+  toggleOnTop() {
+    this.onTop = !this.onTop;
+    getCurrentWindow().setAlwaysOnTop(this.onTop).catch(() => toast("Couldn't keep the window on top."));
+    this.refresh();
   }
 
   async toggleFullscreen() {

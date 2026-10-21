@@ -8,6 +8,7 @@ export enum UserAttentionType {
 
 export function getCurrentWindow() {
   return {
+    setAlwaysOnTop: async (_on: boolean) => {},
     setTheme: async (_theme: "light" | "dark" | null) => {},
     requestUserAttention: async (_type: UserAttentionType | null) => {},
     setTitle: async (t: string) => {
