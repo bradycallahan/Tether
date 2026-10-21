@@ -122,6 +122,38 @@ export interface Settings {
   showStatusBar: boolean;
   /** The master passphrase has been offered once (first run). */
   vaultOffered: boolean;
+  /** TFTP server folder; empty means "tftp" in the data folder. */
+  tftpFolder: string;
+  /** Address to listen on; empty means every interface. */
+  tftpAddress: string;
+  tftpPort: number;
+  tftpAllowOverwrite: boolean;
+  /** Only answer devices that have a tab open. */
+  tftpOpenTabsOnly: boolean;
+  tftpStartWithApp: boolean;
+}
+
+export interface TftpStatus {
+  running: boolean;
+  /** Where it listens; empty for every interface. */
+  address: string;
+  port: number;
+  folder: string;
+  /** This PC's addresses, to type into the device. */
+  addresses: { address: string; interface: string }[];
+}
+
+/** One TFTP transfer. "send" means the device reads a file from the folder. */
+export interface TftpTransfer {
+  id: number;
+  peer: string;
+  file: string;
+  direction: "send" | "receive";
+  state: "active" | "done" | "failed" | "refused";
+  bytes: number;
+  total: number | null;
+  elapsedMs: number;
+  error: string | null;
 }
 
 export interface WorkspaceTab {

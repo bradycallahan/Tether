@@ -4,6 +4,8 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import { emitLocal } from "./event";
+
 /** Dialogs open in the page in the preview, not in windows of their own. */
 export const isTauri = () => false;
 
@@ -80,6 +82,13 @@ const db = {
     showStatusBar: true,
     // A first-run library (?empty) shows the master passphrase offer.
     vaultOffered: !empty,
+    tftpFolder: "",
+    tftpAddress: "",
+    tftpPort: 69,
+    tftpAllowOverwrite: false,
+    tftpOpenTabsOnly: false,
+    // ?tftp starts the TFTP server with Tether and plays a couple of transfers.
+    tftpStartWithApp: new URLSearchParams(location.search).has("tftp"),
   } as Args,
   bars: [
     {
@@ -224,7 +233,62 @@ async function connect(a: Args) {
   return { logPath: s.terminal.logEnabled ? `/home/admin/.config/Tether/logs/${s.name}.log` : null };
 }
 
+// ---------------------------------------------------------------------------
+// Fake TFTP server: once started, a switch pulls an image and pushes a config.
+
+const tftp = { running: false, timers: [] as number[], nextId: 1, active: new Map<number, Args>() };
+const tftpStatus = () => ({
+  running: tftp.running,
+  address: db.settings.tftpAddress,
+  port: db.settings.tftpPort,
+  folder: db.settings.tftpFolder || "/home/admin/.config/Tether/tftp",
+  addresses: [
+    { address: "192.168.1.20", interface: "Wi-Fi" },
+    { address: "10.10.0.50", interface: "USB Ethernet" },
+  ],
+});
+
+function fakeTransfer(at: number, file: string, peer: string, direction: "send" | "receive", total: number, secs: number, error?: string) {
+  const id = tftp.nextId++;
+  const base = { id, peer, file, direction, total, error: null as string | null };
+  const steps = Math.max(1, Math.round(secs * 5));
+  tftp.timers.push(window.setTimeout(() => {
+    for (let i = 0; i <= steps; i++) {
+      tftp.timers.push(window.setTimeout(() => {
+        const last = i === steps;
+        const bytes = error && last ? Math.round(total * 0.4) : Math.round((total * i) / steps);
+        const state = !last ? "active" : error ? "failed" : "done";
+        const t = { ...base, bytes, elapsedMs: i * 200, state, error: last ? error ?? null : null };
+        if (last) tftp.active.delete(id);
+        else tftp.active.set(id, t);
+        emitLocal("tftp-transfer", t);
+      }, i * 200));
+    }
+  }, at));
+}
+
 const handlers: Record<string, (a: Args) => unknown> = {
+  tftp_status: () => tftpStatus(),
+  tftp_start: async () => {
+    await wait(120);
+    tftp.running = true;
+    fakeTransfer(1500, "c9500-universalk9.17.09.04a.SPA.bin", "10.10.0.1", "send", 1_184_563_200, 8);
+    fakeTransfer(3500, "backups/core-sw2-confg", "10.10.0.2", "receive", 48_211, 1);
+    fakeTransfer(6000, "idf3-acc1-confg", "10.10.3.11", "receive", 30_000, 1.5, "The device stopped answering partway through");
+    const s = tftpStatus();
+    emitLocal("tftp-status", s);
+    return s;
+  },
+  tftp_stop: () => {
+    tftp.running = false;
+    tftp.timers.forEach(clearTimeout);
+    tftp.timers = [];
+    for (const t of tftp.active.values()) emitLocal("tftp-transfer", { ...t, state: "failed", error: "The TFTP server was stopped" });
+    tftp.active.clear();
+    const s = tftpStatus();
+    emitLocal("tftp-status", s);
+    return s;
+  },
   list_sessions: () => structuredClone(db.sessions),
   save_session: ({ session }) => {
     const i = db.sessions.findIndex((s) => s.id === session.id);

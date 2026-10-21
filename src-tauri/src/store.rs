@@ -83,6 +83,15 @@ impl Store {
         }
     }
 
+    /// Where the TFTP server reads and writes files.
+    pub fn tftp_dir(&self, settings: &Settings) -> PathBuf {
+        if settings.tftp_folder.trim().is_empty() {
+            self.root.join("tftp")
+        } else {
+            expand_home(&settings.tftp_folder)
+        }
+    }
+
     fn seed_defaults(&self) -> Result<()> {
         if !self.root.join("button_bars.toml").exists() {
             self.save_button_bars(&default_button_bars())?;

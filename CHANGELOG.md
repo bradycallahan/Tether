@@ -4,6 +4,9 @@ All notable changes to Tether are listed here. The format follows [Keep a Change
 
 ## Unreleased
 
+### Added
+- Built-in TFTP server, like SecureCRT's: Tools > Start TFTP server, and devices can `copy tftp://<your PC>/file flash:` or back up with `copy running-config tftp:`. While it runs, the status bar shows the address to use and each transfer's progress; click it for every address on this PC (with Copy), the folder, and recent transfers. Settings > TFTP server picks the folder, address and port, can start it with Tether, and has two safety switches: received files never replace existing ones unless you allow it, and the server can answer only devices you have a tab open to. Transfers are logged to `tftp.log` in the log folder. Large images work (block-size and size options, past 65,535 blocks), and quitting during a transfer asks first
+
 ## 0.3.0 — 2026-10-21
 
 ### Added

@@ -269,6 +269,15 @@ pub struct Settings {
     pub show_status_bar: bool,
     /// The master passphrase has been offered (once, at first run).
     pub vault_offered: bool,
+    /// TFTP server folder; empty means "tftp" in the data folder.
+    pub tftp_folder: String,
+    /// Address to listen on; empty means every interface.
+    pub tftp_address: String,
+    pub tftp_port: u16,
+    pub tftp_allow_overwrite: bool,
+    /// Only answer devices that have a tab open (by host name or address).
+    pub tftp_open_tabs_only: bool,
+    pub tftp_start_with_app: bool,
 }
 
 impl Default for Settings {
@@ -302,6 +311,12 @@ impl Default for Settings {
             show_sidebar: true,
             show_status_bar: true,
             vault_offered: false,
+            tftp_folder: String::new(),
+            tftp_address: String::new(),
+            tftp_port: 69,
+            tftp_allow_overwrite: false,
+            tftp_open_tabs_only: false,
+            tftp_start_with_app: false,
         }
     }
 }

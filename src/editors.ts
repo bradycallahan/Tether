@@ -712,7 +712,7 @@ export async function quickConnectDialog(kind: ProtocolKind = "ssh"): Promise<{ 
 // ---------------------------------------------------------------------------
 // Settings
 
-export type SettingsPage = "appearance" | "terminal" | "highlighting" | "buttons" | "files" | "security";
+export type SettingsPage = "appearance" | "terminal" | "highlighting" | "buttons" | "files" | "tftp" | "security";
 
 export async function editSettings(
   actions: { importSecureCrt: () => void; editBars: () => void; editHighlights: () => void },
@@ -795,6 +795,27 @@ export async function editSettings(
     );
   });
 
+  // TFTP server
+  const tftpDir = input(s.tftpFolder, { placeholder: "tftp in Tether's data folder" });
+  const tftpBrowse = button("Browse…", {
+    onclick: async () => {
+      const d = await openDialog({ directory: true, multiple: false, title: "TFTP folder" });
+      if (typeof d === "string") tftpDir.value = d;
+    },
+  });
+  // A saved address that's gone (cable unplugged, VPN down) stays selectable rather than silently changing.
+  const tftpAddr = select(s.tftpAddress, [["", "All network interfaces"], ...(s.tftpAddress ? [[s.tftpAddress, s.tftpAddress] as [string, string]] : [])]);
+  const tftpPort = input(s.tftpPort, { min: 1, max: 65535 });
+  const tftpStart = h("input", { type: "checkbox", checked: s.tftpStartWithApp });
+  const tftpOverwrite = h("input", { type: "checkbox", checked: s.tftpAllowOverwrite });
+  const tftpTabsOnly = h("input", { type: "checkbox", checked: s.tftpOpenTabsOnly });
+  api.tftpStatus().then((st) => {
+    if (!s.tftpFolder) tftpDir.placeholder = st.folder;
+    for (const a of st.addresses) {
+      if (a.address !== s.tftpAddress) tftpAddr.append(h("option", { value: a.address }, a.interface ? `${a.address} (${a.interface})` : a.address));
+    }
+  }).catch(() => {});
+
   const cats = categories([
     {
       name: "Appearance",
@@ -856,9 +877,23 @@ export async function editSettings(
         linksRow,
       ),
     },
+    {
+      name: "TFTP server",
+      icon: "transfer",
+      el: panel(
+        field("Folder", h("div", { class: "inline" }, tftpDir, tftpBrowse), "Devices read files from here and write received files here. Sub-folders work too: backups/sw1-confg."),
+        h("div", { class: "grid2" }, field("Listen on", tftpAddr), field("UDP port", tftpPort, "Devices expect 69.")),
+        check("Start the TFTP server when Tether starts", tftpStart, "Otherwise start it from Tools when you need it."),
+        section("Safety",
+          check("Let devices replace files already in the folder", tftpOverwrite, "Off: a device can't overwrite a file that's there. Backups of the same switch need a new name each time."),
+          check("Only answer devices that have an open tab", tftpTabsOnly, "Matches the device's address against open SSH, Telnet and raw tabs. Leave off when you work over a serial console, since Tether doesn't know that device's address."),
+        ),
+        h("p", { class: "hint" }, "Every transfer is written to tftp.log in the log folder."),
+      ),
+    },
     { name: "Security", icon: "lock", el: securityPanel() },
   ]);
-  const pages: SettingsPage[] = ["appearance", "terminal", "highlighting", "buttons", "files", "security"];
+  const pages: SettingsPage[] = ["appearance", "terminal", "highlighting", "buttons", "files", "tftp", "security"];
   if (page) cats.show(Math.max(0, pages.indexOf(page)));
 
   return modal((done) => ({
@@ -885,6 +920,12 @@ export async function editSettings(
       s.defaultHighlightSet = hlDefault.value || null;
       s.defaultButtonBar = barDefault.value || null;
       s.logDirectory = logDir.value.trim();
+      s.tftpFolder = tftpDir.value.trim();
+      s.tftpAddress = tftpAddr.value;
+      s.tftpPort = Math.round(clamp(Number(tftpPort.value), 1, 65535, 69));
+      s.tftpStartWithApp = tftpStart.checked;
+      s.tftpAllowOverwrite = tftpOverwrite.checked;
+      s.tftpOpenTabsOnly = tftpTabsOnly.checked;
       done(s);
     },
   }));

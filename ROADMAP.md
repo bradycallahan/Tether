@@ -40,7 +40,7 @@ How Tether 0.1 compares with what SecureCRT offers, and what's planned next. "Do
 | Scripting (Python / VBScript) | Yes | Planned (see below) |
 | SFTP tab / file transfer | Yes | Planned |
 | Xmodem / Ymodem / Zmodem | Yes | Planned |
-| Built-in TFTP server | Yes | Planned |
+| Built-in TFTP server | Yes | Done (status bar, transfer log, overwrite and open-tabs-only guards) |
 | Port forwarding (local/remote/dynamic) | Yes | Planned |
 | X11 forwarding | Yes | Later |
 | SSH agent / agent forwarding | Yes | Planned |
@@ -54,9 +54,8 @@ How Tether 0.1 compares with what SecureCRT offers, and what's planned next. "Do
 1. **SFTP pane** beside an SSH tab, plus drag-and-drop upload. russh-sftp makes this mostly UI work.
 2. **Port forwarding** per session (local, remote, SOCKS).
 3. **SSH agent** support: Pageant / Windows OpenSSH agent / ssh-agent, and forwarding.
-4. **TFTP server** in the status bar for pushing IOS images and pulling configs.
-5. **Xmodem/Ymodem** over serial for ROMMON image recovery.
-6. **Split panes** that can be dragged and resized.
+4. **Xmodem/Ymodem** over serial for ROMMON image recovery.
+5. **Split panes** that can be dragged and resized.
 
 ## Scripting
 
