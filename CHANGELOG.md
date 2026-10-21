@@ -4,25 +4,9 @@ All notable changes to Tether are listed here. The format follows [Keep a Change
 
 ## Unreleased
 
+## 0.3.0 — 2026-10-21
+
 ### Added
-- Menu bar (File, Edit, View, Session, Tools, Window, Help) and a labeled toolbar; every action shows its shortcut where you'd look for it
-- "Connect to…" box in the toolbar that suggests saved sessions as you type and shows recent ones when empty
-- Quick connect dialog, with the option to save the session
-- Welcome screen with recent sessions, detected serial adapters (connect in one click) and, on first run, the SecureCRT importer
-- Login actions: expect/send steps with templates for Cisco, Juniper and Aruba gear, a per-step timeout, and `{username}`, `{password}` and `{enable}` filled in from the session and the system keychain
-- Enable password and a login user name per session, saved in the system keychain / session file
-- Reopen last time's tabs on startup, with titles, tiling and broadcast checkboxes (broadcast itself always starts off)
-- Recent sessions in the File menu, the new-tab menu and the welcome screen
-- Automatic reconnect when a connection drops, with back-off and a Stop button
-- Anti-idle: send a keystroke after a quiet spell so devices with exec-timeouts don't log you out
-- Session manager: new folders (including empty ones), multi-select, drag-and-drop between folders, inline rename (F2), Move to, Copy address, Connect all in tiles, and a port LED on every open session
-- Drag sessions from the tree onto the tab area to open them
-- Per-session terminal color scheme, with a live preview
-- Clone tab (Ctrl+Shift+D), Close tabs to the right, Disconnect all, Reconnect all closed tabs, Reset terminal
-- Button bar: right-click a button to edit, move or delete it (with Undo), or add one with +
-- Keyboard shortcuts sheet (F1), quick reference for address formats and send-string escapes, About
-- Confirmation before quitting with connected tabs
-- Full screen (F11) and F10 to reach the menu bar
 - Tether reopens at the size and place it was closed, maximized if it was; a window left on a monitor that's no longer plugged in opens centered instead
 - The taskbar button flashes when a background tab rings the bell or drops its connection
 - Ctrl+Insert copies and Shift+Insert pastes everywhere, the Windows convention
@@ -57,13 +41,36 @@ All notable changes to Tether are listed here. The format follows [Keep a Change
 - Local shells whose path has spaces in it (`C:\Program Files\Git\bin\bash.exe`) start; quote the path, or paste it bare
 
 ### Changed
-
 - Connection failures say what happened in plain words ("Nothing answered on 10.0.0.1 port 2222…", "Couldn't find sw1…") instead of the raw operating-system message
 - Windows: the title bar follows Tether's light or dark theme, scrollbars are the thin Windows 11 overlay kind, and the browser's form suggestions no longer drop down under host and user fields
 - The button bar starts hidden on new installs; turn it on from View > Button bar
 - Windows: menus use Windows 11 proportions
 - The window appears once it's drawn, instead of flashing white on launch
 - The installer lists a publisher, copyright and homepage
+
+## 0.2.0 — 2026-10-20
+
+### Added
+- Menu bar (File, Edit, View, Session, Tools, Window, Help) and a labeled toolbar; every action shows its shortcut where you'd look for it
+- "Connect to…" box in the toolbar that suggests saved sessions as you type and shows recent ones when empty
+- Quick connect dialog, with the option to save the session
+- Welcome screen with recent sessions, detected serial adapters (connect in one click) and, on first run, the SecureCRT importer
+- Login actions: expect/send steps with templates for Cisco, Juniper and Aruba gear, a per-step timeout, and `{username}`, `{password}` and `{enable}` filled in from the session and the system keychain
+- Enable password and a login user name per session, saved in the system keychain / session file
+- Reopen last time's tabs on startup, with titles, tiling and broadcast checkboxes (broadcast itself always starts off)
+- Recent sessions in the File menu, the new-tab menu and the welcome screen
+- Automatic reconnect when a connection drops, with back-off and a Stop button
+- Anti-idle: send a keystroke after a quiet spell so devices with exec-timeouts don't log you out
+- Session manager: new folders (including empty ones), multi-select, drag-and-drop between folders, inline rename (F2), Move to, Copy address, Connect all in tiles, and a port LED on every open session
+- Drag sessions from the tree onto the tab area to open them
+- Per-session terminal color scheme, with a live preview
+- Clone tab (Ctrl+Shift+D), Close tabs to the right, Disconnect all, Reconnect all closed tabs, Reset terminal
+- Button bar: right-click a button to edit, move or delete it (with Undo), or add one with +
+- Keyboard shortcuts sheet (F1), quick reference for address formats and send-string escapes, About
+- Confirmation before quitting with connected tabs
+- Full screen (F11) and F10 to reach the menu bar
+
+### Changed
 - Session options and Settings use a category list instead of tabs, and gained Appearance, Logging and Advanced pages
 - Every connection state is shown in a banner above the terminal: connecting, failed (with Try again and Edit session), dropped (with Reconnect) and waiting to reconnect
 - The multi-line paste dialog says which device or how many tabs the paste is going to, and warns in amber while broadcasting
