@@ -291,7 +291,7 @@ impl Default for Settings {
             log_directory: String::new(),
             reconnect_on_enter: true,
             show_command_bar: false,
-            show_button_bar: true,
+            show_button_bar: false,
             sidebar_width: 260,
             // WebKitGTK can stall repaints of background WebGL canvases.
             gpu_rendering: !cfg!(target_os = "linux"),

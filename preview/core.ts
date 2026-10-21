@@ -65,7 +65,7 @@ const db = {
     logDirectory: "",
     reconnectOnEnter: true,
     showCommandBar: false,
-    showButtonBar: true,
+    showButtonBar: false,
     sidebarWidth: 260,
     gpuRendering: false,
     restoreWorkspace: true,

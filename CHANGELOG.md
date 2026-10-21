@@ -45,6 +45,7 @@ All notable changes to Tether are listed here. The format follows [Keep a Change
 
 ### Changed
 - Windows: the title bar follows Tether's light or dark theme, scrollbars are the thin Windows 11 overlay kind, and the browser's form suggestions no longer drop down under host and user fields
+- The button bar starts hidden on new installs; turn it on from View > Button bar
 - Windows: menus use Windows 11 proportions
 - The window appears once it's drawn, instead of flashing white on launch
 - The installer lists a publisher, copyright and homepage
